@@ -1,4 +1,26 @@
+# macOS
 .DS_Store
+**/.DS_Store
+._*
+
+# Swift / SPM
 swift/.build/
+.swiftpm/
+
+# Build artifacts
 swift/build/MeetingRecorder
+
+# Xcode (if opened)
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+
+# Claude Code
 .claude/settings.local.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
