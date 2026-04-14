@@ -7,7 +7,7 @@ Local-first macOS meeting recorder with on-device transcription and speaker reco
 ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-required-orange)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-*Screenshot coming soon*
+![Meeting Recorder main window](assets/screenshot-main.png)
 
 ## Features
 
