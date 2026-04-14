@@ -603,10 +603,17 @@ class PeopleStore: ObservableObject {
         exportSession.outputFileType = .caf
         exportSession.timeRange = timeRange
 
-        do {
-            try await exportSession.export(to: destURL, as: .caf)
-        } catch {
-            print("Failed to extract audio clip: \(error)")
+        if #available(macOS 15.0, *) {
+            do {
+                try await exportSession.export(to: destURL, as: .caf)
+            } catch {
+                print("Failed to extract audio clip: \(error)")
+            }
+        } else {
+            await exportSession.export()
+            if let error = exportSession.error {
+                print("Failed to extract audio clip: \(error)")
+            }
         }
     }
 
