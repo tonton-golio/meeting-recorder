@@ -49,8 +49,9 @@ cat > "$APP/Contents/Info.plist" << PLIST
     <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
-    <key>LSUIElement</key>
-    <true/>
+    <!-- LSUIElement removed: the app launches with a window and dock icon.
+         MainView toggles NSApp.activationPolicy between .regular (window open)
+         and .accessory (window closed, menu-bar-only). -->
     <key>NSMicrophoneUsageDescription</key>
     <string>Meeting Recorder needs microphone access to record your meetings.</string>
     <key>NSScreenCaptureUsageDescription</key>

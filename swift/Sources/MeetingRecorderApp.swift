@@ -1,27 +1,40 @@
 import SwiftUI
 
+class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            // Re-open the main window when the user clicks the dock icon.
+            for window in NSApp.windows where window.frame.width > 400 {
+                window.makeKeyAndOrderFront(nil)
+            }
+            NSApp.setActivationPolicy(.regular)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        return true
+    }
+}
+
 @main
 struct MeetingRecorderApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var state = AppState()
-    @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
+        // WindowGroup is the primary scene — auto-opens on launch.
+        WindowGroup("Meeting Recorder") {
+            MainView(state: state, recordingStore: state.recordingStore)
+        }
+        .defaultSize(width: 860, height: 560)
+        .commands {
+            CommandGroup(replacing: .newItem) { }
+        }
+
         MenuBarExtra {
             MenuBarPanelView(state: state)
         } label: {
             menuBarLabel
         }
         .menuBarExtraStyle(.window)
-
-        Window("Meeting Recorder", id: "main") {
-            MainView(state: state, recordingStore: state.recordingStore)
-                .onAppear {
-                    // Auto-open on first launch
-                    NSApp.setActivationPolicy(.regular)
-                    NSApp.activate(ignoringOtherApps: true)
-                }
-        }
-        .defaultSize(width: 860, height: 560)
     }
 
     @ViewBuilder
