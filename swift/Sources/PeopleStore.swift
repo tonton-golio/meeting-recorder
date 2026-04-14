@@ -96,6 +96,55 @@ class PeopleStore: ObservableObject {
         return person
     }
 
+    /// Create a person from an already-recorded audio clip file (e.g. from onboarding).
+    /// The file is moved into the person's folder.
+    func createPersonFromFile(
+        name: String,
+        existingClipURL: URL,
+        duration: Double,
+        embedding: [Float],
+        qualityScore: Float? = nil,
+        notes: String? = nil
+    ) -> Person {
+        let personID = UUID()
+        let personDir = peopleDir.appendingPathComponent(personID.uuidString)
+        try? FileManager.default.createDirectory(at: personDir, withIntermediateDirectories: true)
+
+        let sampleID = UUID()
+        let sampleURL = personDir.appendingPathComponent("\(sampleID.uuidString).caf")
+        let fm = FileManager.default
+        _ = try? fm.removeItem(at: sampleURL)
+        do {
+            try fm.moveItem(at: existingClipURL, to: sampleURL)
+        } catch {
+            _ = try? fm.copyItem(at: existingClipURL, to: sampleURL)
+        }
+
+        let sample = VoiceSample(
+            id: sampleID,
+            embedding: Self.normalize(embedding),
+            duration: duration,
+            sourceRecordingID: nil,
+            createdAt: Date(),
+            modelVersion: Self.currentEmbeddingModelVersion,
+            qualityScore: qualityScore
+        )
+
+        let person = Person(
+            id: personID,
+            name: name,
+            samples: [sample],
+            createdAt: Date(),
+            updatedAt: Date(),
+            notes: notes
+        )
+
+        people.append(person)
+        people.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        saveIndex()
+        return person
+    }
+
     func rename(_ person: Person, to newName: String) {
         guard let idx = people.firstIndex(where: { $0.id == person.id }) else { return }
         people[idx].name = newName

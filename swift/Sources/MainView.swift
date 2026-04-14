@@ -25,6 +25,10 @@ struct MainView: View {
         .task {
             state.bootstrap()
         }
+        .sheet(isPresented: $state.showOnboarding) {
+            OnboardingView(state: state)
+                .interactiveDismissDisabled()
+        }
         .sheet(isPresented: $state.showSettings) {
             SettingsSheet()
                 .environmentObject(state)

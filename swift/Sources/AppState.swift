@@ -45,6 +45,7 @@ class AppState: ObservableObject {
     @Published var isWindowOpen = false
     @Published var showSettings = false
     @Published var showPeople = false
+    @Published var showOnboarding = false
     @Published var showMicPermissionAlert = false
     @Published var diskSpaceWarning: String?
     @Published var showDiskSpaceAlert = false
@@ -72,6 +73,10 @@ class AppState: ObservableObject {
         recordingStore.performRetentionCleanup()
         requestNotificationPermission()
         setupGlobalHotkey()
+
+        if !Preferences.shared.onboardingCompleted {
+            showOnboarding = true
+        }
     }
 
     /// Register Ctrl+Opt+R as a system-wide hotkey to toggle recording from any app.

@@ -119,6 +119,19 @@ class Preferences {
         set { defaults.set(newValue, forKey: "retentionMode") }
     }
 
+    // MARK: - Onboarding
+
+    var onboardingCompleted: Bool {
+        get { defaults.bool(forKey: "onboardingCompleted") }
+        set { defaults.set(newValue, forKey: "onboardingCompleted") }
+    }
+
+    /// The name the user entered during onboarding (used to pre-create their Person).
+    var userName: String {
+        get { defaults.string(forKey: "userName") ?? "" }
+        set { defaults.set(newValue, forKey: "userName") }
+    }
+
     // MARK: - Defaults
 
     static let basePath = NSHomeDirectory() + "/.meeting-recorder"
