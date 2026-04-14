@@ -1,0 +1,4 @@
+.DS_Store
+swift/.build/
+swift/build/MeetingRecorder
+.claude/settings.local.json
