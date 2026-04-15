@@ -1,6 +1,19 @@
 import AVFoundation
 import Foundation
 
+/// Debug logger that writes to a file (macOS GUI apps swallow stdout/stderr).
+func debugLog(_ msg: String) {
+    let line = "\(Date()): \(msg)\n"
+    let path = NSHomeDirectory() + "/.meeting-recorder/debug.log"
+    if let fh = FileHandle(forWritingAtPath: path) {
+        fh.seekToEndOfFile()
+        fh.write(line.data(using: .utf8)!)
+        fh.closeFile()
+    } else {
+        FileManager.default.createFile(atPath: path, contents: line.data(using: .utf8))
+    }
+}
+
 @MainActor
 class AudioRecorder: ObservableObject {
     @Published var isRecording = false
@@ -17,6 +30,13 @@ class AudioRecorder: ObservableObject {
     private var systemAudioURL: URL?
     @Published var systemAudioWarning: String?      // non-nil if we couldn't start SCK
 
+    /// Rolling history of mic audio levels (0–1) for waveform display.
+    @Published var micLevelHistory: [Float] = []
+    /// Rolling history of system audio levels (0–1) for waveform display.
+    @Published var systemLevelHistory: [Float] = []
+    private var meterTimer: Timer?
+    private static let historySize = 50
+
     var elapsed: TimeInterval {
         guard let start = startTime, isRecording else { return 0 }
         return Date().timeIntervalSince(start)
@@ -25,6 +45,7 @@ class AudioRecorder: ObservableObject {
     func start() throws {
         guard !isRecording else { throw RecorderError.alreadyRecording }
         systemAudioWarning = nil
+        debugLog("[AudioRecorder] start() called — captureSystemAudio=\(Preferences.shared.captureSystemAudio)")
 
         let recordingsDir = URL(fileURLWithPath: Preferences.shared.recordingsPath)
         try FileManager.default.createDirectory(at: recordingsDir, withIntermediateDirectories: true)
@@ -44,6 +65,7 @@ class AudioRecorder: ObservableObject {
         ]
 
         avRecorder = try AVAudioRecorder(url: micURL, settings: settings)
+        avRecorder?.isMeteringEnabled = true
         guard let recorder = avRecorder, recorder.record() else {
             throw RecorderError.failedToStart
         }
@@ -53,19 +75,35 @@ class AudioRecorder: ObservableObject {
         startTime = Date()
         isRecording = true
 
-        // Best-effort: start system-audio capture (the other side of calls). If it fails we
-        // continue with mic-only and the final WAV just equals the mic recording.
+        // Best-effort: set up system-audio capture (the other side of calls).
+        // Assign systemAudio BEFORE startMetering() so the level callback wires up.
         if Preferences.shared.captureSystemAudio, #available(macOS 14.0, *) {
             let capture = SystemAudioCapture()
             systemAudio = capture
             systemAudioURL = sysURL
+        }
+
+        startMetering()
+
+        // Start the async capture after metering is wired up.
+        if Preferences.shared.captureSystemAudio, #available(macOS 14.0, *),
+           let capture = systemAudio as? SystemAudioCapture {
             Task.detached { [weak self] in
                 do {
                     try await capture.start(outputURL: sysURL)
+                    // Wire up silent-stream watchdog
+                    capture.onSilentStreamDetected = { [weak self] in
+                        Task { @MainActor in
+                            guard let self else { return }
+                            self.systemAudioWarning = "System audio stream started but no audio is being received. Screen Recording permission may need to be re-granted — toggle it off and on in System Settings, then restart the app."
+                            debugLog("[AudioRecorder] Silent stream detected — permission likely stale")
+                        }
+                    }
+                    debugLog("[AudioRecorder] System audio capture started successfully")
                 } catch {
                     await MainActor.run {
                         self?.systemAudioWarning = error.localizedDescription
-                        NSLog("[AudioRecorder] System audio capture failed to start: \(error). Continuing with mic only.")
+                        debugLog("[AudioRecorder] System audio capture FAILED: \(error)")
                     }
                 }
             }
@@ -73,6 +111,7 @@ class AudioRecorder: ObservableObject {
     }
 
     func stop() async throws -> (id: String, url: URL, duration: TimeInterval) {
+        stopMetering()
         let recordedDuration = avRecorder?.currentTime ?? 0
         avRecorder?.stop()
         let dur = recordedDuration > 0
@@ -99,6 +138,13 @@ class AudioRecorder: ObservableObject {
         try await Task.detached(priority: .userInitiated) {
             if #available(macOS 14.0, *), let capture = sysCapture as? SystemAudioCapture {
                 await capture.stop()
+                // If the stream ran but captured no audible audio, flag it
+                if !capture.capturedAnyAudio {
+                    await MainActor.run {
+                        self.systemAudioWarning = self.systemAudioWarning ?? "System audio captured silence — the remote side may not have been recorded."
+                        debugLog("[AudioRecorder] System audio captured no audible content")
+                    }
+                }
             }
             // Small settle delay to ensure the SCK file is fully flushed.
             try? await Task.sleep(nanoseconds: 150_000_000)
@@ -112,6 +158,56 @@ class AudioRecorder: ObservableObject {
         let f = DateFormatter()
         f.dateFormat = "yyyyMMdd_HHmmss"
         return f.string(from: Date())
+    }
+
+    // MARK: - Audio Level Metering
+
+    private func startMetering() {
+        micLevelHistory = Array(repeating: 0, count: Self.historySize)
+        systemLevelHistory = Array(repeating: 0, count: Self.historySize)
+
+        // Wire up system audio level callback
+        if #available(macOS 14.0, *), let capture = systemAudio as? SystemAudioCapture {
+            capture.levelCallback = { [weak self] level in
+                Task { @MainActor [weak self] in
+                    guard let self, self.isRecording else { return }
+                    self.systemLevelHistory.append(level)
+                    if self.systemLevelHistory.count > Self.historySize {
+                        self.systemLevelHistory.removeFirst(self.systemLevelHistory.count - Self.historySize)
+                    }
+                }
+            }
+        }
+
+        let timer = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, let rec = self.avRecorder, self.isRecording else { return }
+                rec.updateMeters()
+                let db = rec.averagePower(forChannel: 0)
+                let normalized = max(0, min(1, (db + 50) / 50))
+                self.micLevelHistory.append(normalized)
+                if self.micLevelHistory.count > Self.historySize {
+                    self.micLevelHistory.removeFirst(self.micLevelHistory.count - Self.historySize)
+                }
+                // If no system audio capture, still push zeros so the waveform stays aligned
+                if self.systemAudio == nil || self.systemAudioWarning != nil {
+                    self.systemLevelHistory.append(0)
+                    if self.systemLevelHistory.count > Self.historySize {
+                        self.systemLevelHistory.removeFirst(self.systemLevelHistory.count - Self.historySize)
+                    }
+                }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        meterTimer = timer
+    }
+
+    private func stopMetering() {
+        meterTimer?.invalidate()
+        meterTimer = nil
+        if #available(macOS 14.0, *), let capture = systemAudio as? SystemAudioCapture {
+            capture.levelCallback = nil
+        }
     }
 
     // MARK: - Offline mix of mic + system audio
@@ -132,7 +228,7 @@ class AudioRecorder: ObservableObject {
             // No system audio — promote mic.wav → final.wav
             _ = try? fm.removeItem(at: finalURL)
             do { try fm.moveItem(at: micURL, to: finalURL) } catch {
-                NSLog("[AudioRecorder] rename mic → final failed: \(error)")
+                debugLog("[AudioRecorder] rename mic → final failed: \(error)")
             }
             return
         }
@@ -144,7 +240,7 @@ class AudioRecorder: ObservableObject {
             _ = try? fm.removeItem(at: micURL)
             _ = try? fm.removeItem(at: sysURL!)
         } catch {
-            NSLog("[AudioRecorder] offline mix failed, falling back to mic only: \(error)")
+            debugLog("[AudioRecorder] offline mix failed, falling back to mic only: \(error)")
             _ = try? fm.removeItem(at: finalURL)
             try? fm.moveItem(at: micURL, to: finalURL)
         }

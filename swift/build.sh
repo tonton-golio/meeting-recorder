@@ -77,10 +77,22 @@ cat > "$BUILD_DIR/entitlements.plist" << 'ENT'
 </plist>
 ENT
 
-# Sign with entitlements
-codesign --force --deep --sign - \
-    --entitlements "$BUILD_DIR/entitlements.plist" \
-    "$APP" 2>/dev/null
+# Sign with entitlements.
+# Prefer a local "MeetingRecorder Dev" certificate for stable signing (TCC permissions
+# survive rebuilds). Falls back to ad-hoc if the cert doesn't exist.
+SIGN_IDENTITY="MeetingRecorder Dev"
+SIGN_HASH=$(security find-identity -v -p codesigning 2>/dev/null | grep "$SIGN_IDENTITY" | head -1 | awk '{print $2}')
+if [ -n "$SIGN_HASH" ]; then
+    echo "  Signing with '$SIGN_IDENTITY' certificate (stable identity)"
+    codesign --force --deep --sign "$SIGN_HASH" \
+        --entitlements "$BUILD_DIR/entitlements.plist" \
+        "$APP" 2>/dev/null
+else
+    echo "  Signing ad-hoc (Screen Recording permission may need re-granting after each build)"
+    codesign --force --deep --sign - \
+        --entitlements "$BUILD_DIR/entitlements.plist" \
+        "$APP" 2>/dev/null
+fi
 
 xattr -cr "$APP"
 
