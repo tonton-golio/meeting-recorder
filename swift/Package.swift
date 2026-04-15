@@ -9,9 +9,14 @@ let package = Package(
         .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.12.0"),
     ],
     targets: [
+        .target(
+            name: "SpeakerMatchingCore",
+            path: "SpeakerMatchingCore"
+        ),
         .executableTarget(
             name: "MeetingRecorder",
             dependencies: [
+                "SpeakerMatchingCore",
                 .product(name: "WhisperKit", package: "WhisperKit"),
                 .product(name: "FluidAudio", package: "FluidAudio"),
             ],
@@ -20,10 +25,16 @@ let package = Package(
         .executableTarget(
             name: "Experiments",
             dependencies: [
+                "SpeakerMatchingCore",
                 .product(name: "WhisperKit", package: "WhisperKit"),
                 .product(name: "FluidAudio", package: "FluidAudio"),
             ],
             path: "Experiments"
+        ),
+        .executableTarget(
+            name: "SpeakerMatchingCoreChecks",
+            dependencies: ["SpeakerMatchingCore"],
+            path: "Checks/SpeakerMatchingCoreChecks"
         ),
     ]
 )

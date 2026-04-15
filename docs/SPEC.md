@@ -36,6 +36,12 @@ If the top person's best-sample score exceeds the auto-match threshold (default 
 
 Thresholds are tunable in Settings → Speaker Matching, and the same panel can analyze the current People library (intra-person vs inter-person cosine distributions) to suggest an equal-error-rate threshold.
 
+### Source-aware matching
+
+For recordings that capture both microphone and system audio, the app keeps the raw side-channel stems next to the final mixed WAV while the audio is retained. During diarization, each speaker cluster is compared against the mic and system stems to infer whether that speaker came mostly from the local microphone, system audio, a mix of both, or an unknown source.
+
+Voice samples store this capture source. Matching remains max-over-samples cosine matching, but uses source as a light tie-breaker: same-source samples get a small boost, mic-vs-system mismatches get a small penalty, and unknown-source samples are left unchanged.
+
 ### Sample selection
 When a voice sample is created from a recording, the app picks the longest segment where only that speaker was active (no cross-talk), clamped to 3–15 seconds, trimming the first 0.5s to skip utterance onsets. The embedding stored with the sample is the diarizer's session centroid for that speaker when available — more stable than any single window.
 
@@ -238,6 +244,8 @@ All data lives under `~/.meeting-recorder/`:
   recordings/
     recordings.json          # index of all recordings
     20260410_154636.wav      # audio files
+    20260410_154636.mic.wav  # local microphone stem, when retained
+    20260410_154636.sys.wav  # system-audio stem, when retained
     20260411_130000.wav
   people/
     people.json              # index of all people, including each sample's

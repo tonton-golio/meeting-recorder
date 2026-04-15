@@ -1,4 +1,5 @@
 import Foundation
+import SpeakerMatchingCore
 import SwiftUI
 
 // MARK: - Pipeline Step
@@ -105,6 +106,9 @@ struct VoiceSample: Identifiable, Codable {
     var modelVersion: String?
     /// Optional quality score from the diarizer (higher = cleaner).
     var qualityScore: Float?
+    /// Acoustic channel the sample came from. Used as a light matching hint
+    /// because mic and system audio can embed differently for the same person.
+    var captureSource: AudioCaptureSource?
 
     var filename: String { "\(id.uuidString).caf" }
 }
@@ -121,6 +125,7 @@ struct DetectedSpeaker: Identifiable {
     let sampleStartTime: Double       // start of representative segment
     let sampleEndTime: Double         // end of representative segment
     var sampleQuality: Float?         // diarizer quality hint for the chosen window
+    var captureSource: AudioCaptureSource  // inferred from mic/system stems
     var recommendations: [SpeakerRecommendation]  // top matches below auto-match threshold
 
     var isHighConfidence: Bool { matchedPerson != nil && (matchScore ?? 0) >= 0.62 }

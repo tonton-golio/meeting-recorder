@@ -527,7 +527,8 @@ class AppState: ObservableObject {
                 startTime: speaker.sampleStartTime,
                 endTime: speaker.sampleEndTime,
                 embedding: speaker.embedding,
-                qualityScore: speaker.sampleQuality
+                qualityScore: speaker.sampleQuality,
+                captureSource: speaker.captureSource
             )
         }
 
@@ -578,7 +579,8 @@ class AppState: ObservableObject {
                 startTime: speaker.sampleStartTime,
                 endTime: speaker.sampleEndTime,
                 embedding: speaker.embedding,
-                qualityScore: speaker.sampleQuality
+                qualityScore: speaker.sampleQuality,
+                captureSource: speaker.captureSource
             )
         }
 
@@ -608,7 +610,8 @@ class AppState: ObservableObject {
                 startTime: speaker.sampleStartTime,
                 endTime: speaker.sampleEndTime,
                 embedding: speaker.embedding,
-                qualityScore: speaker.sampleQuality
+                qualityScore: speaker.sampleQuality,
+                captureSource: speaker.captureSource
             )
         }
 

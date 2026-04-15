@@ -14,6 +14,7 @@ Local-first macOS meeting recorder with on-device transcription and speaker reco
 - **Record mic + system audio** -- captures both sides of video calls via ScreenCaptureKit
 - **On-device transcription** -- WhisperKit (CoreML) with model sizes from tiny (75 MB) to large-v3 (2.9 GB)
 - **Speaker diarization** -- FluidAudio identifies who said what, with a learnable voice library that improves over time
+- **Source-aware speaker matching** -- uses retained mic/system stems to reduce close-call speaker mixups
 - **Obsidian-compatible output** -- structured markdown with YAML frontmatter and `[[wikilinks]]` for speaker pages
 - **Menu bar app** -- lives in the menu bar with a global hotkey (Ctrl+Opt+R) for quick recording
 - **Crash recovery** -- two-phase pipeline checkpoints expensive transcription work so crashes don't lose progress
@@ -44,13 +45,14 @@ On first launch, macOS will prompt for two permissions:
 
 ## How it works
 
-1. **Record** -- captures microphone audio (and optionally system audio) as 16kHz mono WAV
+1. **Record** -- captures microphone audio (and optionally system audio) as a final 16kHz mono WAV, retaining mic/system stems while audio is kept
 2. **Transcribe** -- WhisperKit runs Whisper locally via CoreML, producing timestamped text segments
 3. **Diarize** -- FluidAudio clusters audio into speakers and extracts WeSpeaker embeddings (256-dim vectors)
 4. **Match** -- each speaker embedding is compared against the People voice library using cosine similarity. Known voices are auto-labeled; unknown speakers are presented for identification.
 5. **Save** -- the transcript is written as Obsidian-compatible markdown with YAML frontmatter
 
 See [docs/SPEC.md](docs/SPEC.md) for the full product specification.
+See [docs/SPEAKER_IDENTIFICATION_EXPERIMENTS.md](docs/SPEAKER_IDENTIFICATION_EXPERIMENTS.md) for the source-aware matching experiment plan.
 
 ## Data storage
 
@@ -60,7 +62,9 @@ All data lives locally under `~/.meeting-recorder/`:
 ~/.meeting-recorder/
   recordings/
     recordings.json          # recording index
-    *.wav                    # audio files
+    *.wav                    # mixed audio files
+    *.mic.wav                # microphone stems, while retained
+    *.sys.wav                # system-audio stems, while retained
   people/
     people.json              # people index
     {uuid}/                  # per-person directory

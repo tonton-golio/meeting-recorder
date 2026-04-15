@@ -2,6 +2,7 @@ import Foundation
 import AVFoundation
 import WhisperKit
 import FluidAudio
+import SpeakerMatchingCore
 
 let testClipPath = NSHomeDirectory() + "/.meeting-recorder/test/test-5min.wav"
 let resultsDir = NSHomeDirectory() + "/.meeting-recorder/test/results"
@@ -24,7 +25,91 @@ func cosineSimilarity(_ a: [Float], _ b: [Float]) -> Float {
     return dot / (normA * normB)
 }
 
+func energyString(_ value: Double?) -> String {
+    guard let value else { return "n/a" }
+    return String(format: "%.6e", value)
+}
+
+func runSourceAudit(audioURL: URL) async {
+    guard FileManager.default.fileExists(atPath: audioURL.path) else {
+        print("ERROR: Audio file not found: \(audioURL.path)")
+        exit(1)
+    }
+
+    print("=== EXPERIMENT: Source-aware speaker audit ===")
+    print("  Audio: \(audioURL.path)")
+
+    do {
+        let start = Date()
+        let config = OfflineDiarizerConfig()
+        let diarizer = OfflineDiarizerManager(config: config)
+        print("  Preparing diarizer...")
+        try await diarizer.prepareModels()
+        print("  Processing final mix...")
+        let result = try await diarizer.process(audioURL)
+        let speakers = Set(result.segments.map(\.speakerId)).sorted()
+
+        var output = "Source-aware Speaker Audit\n"
+        output += "Audio: \(audioURL.path)\n"
+        output += "Speakers: \(speakers.count) (\(speakers.joined(separator: ", ")))\n"
+        output += "Segments: \(result.segments.count)\n"
+        output += "Time: \(String(format: "%.1f", Date().timeIntervalSince(start)))s\n\n"
+        output += "This audit compares each diarized speaker's energy in sibling stems:\n"
+        output += "  \(audioURL.deletingPathExtension().lastPathComponent).mic.wav\n"
+        output += "  \(audioURL.deletingPathExtension().lastPathComponent).sys.wav\n\n"
+        output += "--- SPEAKER SOURCE AFFINITY ---\n"
+
+        for speaker in speakers {
+            let speakerSegments = result.segments.filter { $0.speakerId == speaker }
+            let windows = speakerSegments.map {
+                Double($0.startTimeSeconds)...Double($0.endTimeSeconds)
+            }
+            let report = AudioSourceEnergyClassifier.analyze(finalAudioURL: audioURL, windows: windows)
+            output += "Speaker \(speaker): source=\(report.source.label)"
+            output += " mic=\(energyString(report.microphoneEnergy))"
+            output += " system=\(energyString(report.systemEnergy))"
+            output += " segments=\(speakerSegments.count)\n"
+        }
+
+        if let db = result.speakerDatabase, db.count >= 2 {
+            output += "\n--- SPEAKER SIMILARITY ---\n"
+            let spks = db.keys.sorted()
+            for i in 0..<spks.count {
+                for j in (i + 1)..<spks.count {
+                    let sim = cosineSimilarity(db[spks[i]]!, db[spks[j]]!)
+                    output += "Speaker \(spks[i]) vs \(spks[j]): \(String(format: "%.3f", sim))\n"
+                }
+            }
+        }
+
+        output += "\n--- SEGMENTS ---\n"
+        for seg in result.segments {
+            let sM = Int(seg.startTimeSeconds) / 60, sS = Int(seg.startTimeSeconds) % 60
+            let eM = Int(seg.endTimeSeconds) / 60, eS = Int(seg.endTimeSeconds) % 60
+            output += "[\(String(format: "%02d:%02d", sM, sS))-\(String(format: "%02d:%02d", eM, eS))] Speaker \(seg.speakerId) q=\(String(format: "%.2f", seg.qualityScore))\n"
+        }
+
+        let stem = audioURL.deletingPathExtension().lastPathComponent
+        let path = (resultsDir as NSString).appendingPathComponent("source-audit-\(stem).txt")
+        try output.write(toFile: path, atomically: true, encoding: .utf8)
+        print("  Saved: \(path)")
+    } catch {
+        print("  SOURCE AUDIT ERROR: \(error)")
+        exit(1)
+    }
+}
+
 Task {
+    let args = Array(CommandLine.arguments.dropFirst())
+    if args.first == "source-audit" {
+        guard args.count >= 2 else {
+            print("Usage: swift run Experiments source-audit /path/to/recording.wav")
+            exit(2)
+        }
+        await runSourceAudit(audioURL: URL(fileURLWithPath: args[1]))
+        exit(0)
+    }
+
     let audioURL = URL(fileURLWithPath: testClipPath)
     guard FileManager.default.fileExists(atPath: testClipPath) else {
         print("ERROR: No test clip at \(testClipPath). Run the previous experiment first to create it.")

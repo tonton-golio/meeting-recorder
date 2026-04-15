@@ -214,9 +214,11 @@ class AudioRecorder: ObservableObject {
 
     /// Produces the final 16kHz mono WAV at `finalURL` by summing mic + system audio.
     /// If the system-audio file is missing or empty, the mic recording is copied verbatim.
+    /// Raw stems are retained next to the final file so speaker matching can
+    /// infer whether a diarized voice came mostly from mic or system audio.
     private static func produceFinalMix(micURL: URL, sysURL: URL?, finalURL: URL) async {
         let fm = FileManager.default
-        // If SCK didn't produce anything usable, just move mic to final.
+        // If SCK didn't produce anything usable, copy mic to final.
         let hasSys: Bool = {
             guard let u = sysURL else { return false }
             guard let attrs = try? fm.attributesOfItem(atPath: u.path),
@@ -225,10 +227,10 @@ class AudioRecorder: ObservableObject {
         }()
 
         if !hasSys {
-            // No system audio — promote mic.wav → final.wav
+            // No system audio — copy mic.wav → final.wav and keep the stem.
             _ = try? fm.removeItem(at: finalURL)
-            do { try fm.moveItem(at: micURL, to: finalURL) } catch {
-                debugLog("[AudioRecorder] rename mic → final failed: \(error)")
+            do { try fm.copyItem(at: micURL, to: finalURL) } catch {
+                debugLog("[AudioRecorder] copy mic → final failed: \(error)")
             }
             return
         }
@@ -236,13 +238,10 @@ class AudioRecorder: ObservableObject {
         // Mix using AVAudioEngine offline rendering.
         do {
             try await Self.mix(micURL: micURL, sysURL: sysURL!, finalURL: finalURL)
-            // Clean up side-channel files on success.
-            _ = try? fm.removeItem(at: micURL)
-            _ = try? fm.removeItem(at: sysURL!)
         } catch {
             debugLog("[AudioRecorder] offline mix failed, falling back to mic only: \(error)")
             _ = try? fm.removeItem(at: finalURL)
-            try? fm.moveItem(at: micURL, to: finalURL)
+            try? fm.copyItem(at: micURL, to: finalURL)
         }
     }
 

@@ -1,6 +1,7 @@
 import AVFoundation
 import FluidAudio
 import Foundation
+import SpeakerMatchingCore
 import SwiftUI
 
 @MainActor
@@ -61,7 +62,8 @@ class PeopleStore: ObservableObject {
         startTime: Double,
         endTime: Double,
         embedding: [Float],
-        qualityScore: Float? = nil
+        qualityScore: Float? = nil,
+        captureSource: AudioCaptureSource? = nil
     ) async -> Person {
         let personID = UUID()
         let personDir = peopleDir.appendingPathComponent(personID.uuidString)
@@ -78,7 +80,8 @@ class PeopleStore: ObservableObject {
             sourceRecordingID: audioURL.deletingPathExtension().lastPathComponent,
             createdAt: Date(),
             modelVersion: Self.currentEmbeddingModelVersion,
-            qualityScore: qualityScore
+            qualityScore: qualityScore,
+            captureSource: captureSource
         )
 
         let person = Person(
@@ -104,6 +107,7 @@ class PeopleStore: ObservableObject {
         duration: Double,
         embedding: [Float],
         qualityScore: Float? = nil,
+        captureSource: AudioCaptureSource? = nil,
         notes: String? = nil
     ) -> Person {
         let personID = UUID()
@@ -127,7 +131,8 @@ class PeopleStore: ObservableObject {
             sourceRecordingID: nil,
             createdAt: Date(),
             modelVersion: Self.currentEmbeddingModelVersion,
-            qualityScore: qualityScore
+            qualityScore: qualityScore,
+            captureSource: captureSource
         )
 
         let person = Person(
@@ -175,7 +180,8 @@ class PeopleStore: ObservableObject {
         startTime: Double,
         endTime: Double,
         embedding: [Float],
-        qualityScore: Float? = nil
+        qualityScore: Float? = nil,
+        captureSource: AudioCaptureSource? = nil
     ) async {
         guard let idx = people.firstIndex(where: { $0.id == person.id }) else { return }
 
@@ -193,7 +199,8 @@ class PeopleStore: ObservableObject {
             sourceRecordingID: audioURL.deletingPathExtension().lastPathComponent,
             createdAt: Date(),
             modelVersion: Self.currentEmbeddingModelVersion,
-            qualityScore: qualityScore
+            qualityScore: qualityScore,
+            captureSource: captureSource
         )
 
         people[idx].samples.append(sample)
@@ -209,7 +216,8 @@ class PeopleStore: ObservableObject {
         existingClipURL: URL,
         duration: Double,
         embedding: [Float],
-        qualityScore: Float? = nil
+        qualityScore: Float? = nil,
+        captureSource: AudioCaptureSource? = nil
     ) {
         guard let idx = people.firstIndex(where: { $0.id == person.id }) else { return }
         let personDir = peopleDir.appendingPathComponent(person.id.uuidString)
@@ -233,7 +241,8 @@ class PeopleStore: ObservableObject {
             sourceRecordingID: nil,
             createdAt: Date(),
             modelVersion: Self.currentEmbeddingModelVersion,
-            qualityScore: qualityScore
+            qualityScore: qualityScore,
+            captureSource: captureSource
         )
 
         people[idx].samples.append(sample)
@@ -333,14 +342,21 @@ class PeopleStore: ObservableObject {
 
     // MARK: - Voice Matching (max-over-samples)
 
-    /// Best cosine similarity between `embedding` and any sample of `person`.
+    /// Best similarity between `embedding` and any sample of `person`.
     /// This is what matching uses — not the old mean "aggregate" vector —
     /// so a person with samples from different conditions (in-person / Zoom /
-    /// headphones) can still be recognised in any of them.
-    func bestSimilarity(embedding: [Float], to person: Person) -> Float {
+    /// headphones) can still be recognised in any of them. When the candidate
+    /// source is known, a small same-source bonus/cross-source penalty is used
+    /// as a tie-breaker.
+    func bestSimilarity(embedding: [Float], source: AudioCaptureSource? = nil, to person: Person) -> Float {
         var best: Float = -1
         for sample in person.samples where !sample.embedding.isEmpty {
-            let s = Self.cosineSimilarity(embedding, sample.embedding)
+            let raw = Self.cosineSimilarity(embedding, sample.embedding)
+            let s = SourceAwareScoring.adjustedSimilarity(
+                rawSimilarity: raw,
+                candidateSource: source,
+                sampleSource: sample.captureSource
+            )
             if s > best { best = s }
         }
         return best < 0 ? 0 : best
@@ -355,6 +371,7 @@ class PeopleStore: ObservableObject {
     /// plus recommendations above recommendThreshold sorted by score.
     func matchWithRecommendations(
         embedding: [Float],
+        source: AudioCaptureSource? = nil,
         autoThreshold: Float = PeopleStore.defaultAutoMatchThreshold,
         recommendThreshold: Float = 0.30
     ) -> (match: Person?, recommendations: [SpeakerRecommendation]) {
@@ -362,7 +379,7 @@ class PeopleStore: ObservableObject {
         var recommendations: [SpeakerRecommendation] = []
 
         for person in people {
-            let score = bestSimilarity(embedding: embedding, to: person)
+            let score = bestSimilarity(embedding: embedding, source: source, to: person)
             if score > (bestMatch?.score ?? 0) {
                 bestMatch = (person, score)
             }
@@ -383,8 +400,12 @@ class PeopleStore: ObservableObject {
     }
 
     /// Simple match (returns best match above threshold, or nil)
-    func match(embedding: [Float], threshold: Float = PeopleStore.defaultAutoMatchThreshold) -> Person? {
-        let result = matchWithRecommendations(embedding: embedding, autoThreshold: threshold)
+    func match(
+        embedding: [Float],
+        source: AudioCaptureSource? = nil,
+        threshold: Float = PeopleStore.defaultAutoMatchThreshold
+    ) -> Person? {
+        let result = matchWithRecommendations(embedding: embedding, source: source, autoThreshold: threshold)
         return result.match
     }
 
@@ -410,7 +431,12 @@ class PeopleStore: ObservableObject {
     /// samples. Returns nil when the person has no samples yet (no guard).
     func similarityToExistingSamples(embedding: [Float], person: Person) -> Float? {
         guard !person.samples.isEmpty else { return nil }
-        return bestSimilarity(embedding: embedding, to: person)
+        var best: Float = -1
+        for sample in person.samples where !sample.embedding.isEmpty {
+            let score = Self.cosineSimilarity(embedding, sample.embedding)
+            if score > best { best = score }
+        }
+        return best < 0 ? nil : best
     }
 
     // MARK: - Calibration helpers
@@ -704,7 +730,8 @@ class PeopleStore: ObservableObject {
                 sourceRecordingID: nil,
                 createdAt: legacy.createdAt,
                 modelVersion: nil,
-                qualityScore: nil
+                qualityScore: nil,
+                captureSource: nil
             )
 
             let person = Person(

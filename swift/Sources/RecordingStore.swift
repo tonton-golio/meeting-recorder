@@ -1,4 +1,5 @@
 import Foundation
+import SpeakerMatchingCore
 
 @MainActor
 class RecordingStore: ObservableObject {
@@ -87,18 +88,20 @@ class RecordingStore: ObservableObject {
         scheduleSave()
     }
 
-    /// Delete only the audio file; keep the recording entry with transcript
+    /// Delete only audio files; keep the recording entry with transcript
     func deleteAudioFile(for entry: RecordingEntry) {
-        let dir = URL(fileURLWithPath: Preferences.shared.recordingsPath)
-        try? FileManager.default.removeItem(at: dir.appendingPathComponent(entry.filename))
+        for url in audioFileURLs(for: entry) {
+            try? FileManager.default.removeItem(at: url)
+        }
         // Duration is preserved so the user still sees the original length
         scheduleSave()
     }
 
-    /// Remove the recording entirely (audio + index entry)
+    /// Remove the recording entirely (audio files + index entry)
     func remove(_ entry: RecordingEntry) {
-        let dir = URL(fileURLWithPath: Preferences.shared.recordingsPath)
-        try? FileManager.default.removeItem(at: dir.appendingPathComponent(entry.filename))
+        for url in audioFileURLs(for: entry) {
+            try? FileManager.default.removeItem(at: url)
+        }
         recordings.removeAll { $0.id == entry.id }
         scheduleSave()
     }
@@ -111,6 +114,13 @@ class RecordingStore: ObservableObject {
         let url = URL(fileURLWithPath: Preferences.shared.recordingsPath)
             .appendingPathComponent(entry.filename)
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    private func audioFileURLs(for entry: RecordingEntry) -> [URL] {
+        let finalURL = URL(fileURLWithPath: Preferences.shared.recordingsPath)
+            .appendingPathComponent(entry.filename)
+        let stems = AudioSourceStemURLs.expectedSiblings(for: finalURL)
+        return [finalURL, stems.microphoneURL, stems.systemURL]
     }
 
     // MARK: - Recovery
@@ -155,11 +165,11 @@ class RecordingStore: ObservableObject {
         guard !expired.isEmpty else { return }
 
         let fm = FileManager.default
-        let recDir = URL(fileURLWithPath: Preferences.shared.recordingsPath)
-
         for entry in expired {
-            // Always delete audio file
-            try? fm.removeItem(at: recDir.appendingPathComponent(entry.filename))
+            // Always delete audio files, including mic/system stems.
+            for url in audioFileURLs(for: entry) {
+                try? fm.removeItem(at: url)
+            }
 
             if mode == "all" {
                 // Also delete markdown (keyed by recordingID prefix) and remove from index
@@ -191,6 +201,7 @@ class RecordingStore: ObservableObject {
 
         for file in files where file.pathExtension == "wav" {
             let id = file.deletingPathExtension().lastPathComponent
+            if id.hasSuffix(".mic") || id.hasSuffix(".sys") { continue }
             if existingIDs.contains(id) { continue }
 
             let date = df.date(from: id) ?? ((try? file.resourceValues(forKeys: [.creationDateKey]))?.creationDate ?? Date())

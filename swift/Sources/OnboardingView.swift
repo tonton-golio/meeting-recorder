@@ -1,5 +1,6 @@
 import AVFoundation
 import FluidAudio
+import SpeakerMatchingCore
 import SwiftUI
 
 struct OnboardingView: View {
@@ -514,7 +515,8 @@ struct VoiceRegistrationStep: View {
                             existingClipURL: url,
                             duration: duration,
                             embedding: embedding,
-                            qualityScore: quality
+                            qualityScore: quality,
+                            captureSource: .microphone
                         )
                     } else {
                         let _ = state.peopleStore.createPersonFromFile(
@@ -523,6 +525,7 @@ struct VoiceRegistrationStep: View {
                             duration: duration,
                             embedding: embedding,
                             qualityScore: quality,
+                            captureSource: .microphone,
                             notes: "Created during onboarding"
                         )
                     }

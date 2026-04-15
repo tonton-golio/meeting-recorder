@@ -1,4 +1,5 @@
 import AVFoundation
+import SpeakerMatchingCore
 import SwiftUI
 
 struct PeopleSheet: View {
@@ -419,7 +420,8 @@ struct PersonDetailView: View {
                         existingClipURL: url,
                         duration: duration,
                         embedding: embedding,
-                        qualityScore: quality
+                        qualityScore: quality,
+                        captureSource: .microphone
                     )
                 },
                 transcriptionService: state.transcriptionService
@@ -520,6 +522,11 @@ struct SampleCard: View {
                         Text("q\(String(format: "%.1f", q))")
                             .font(.system(size: 9))
                             .foregroundStyle(qualityColor(q))
+                    }
+                    if let source = sample.captureSource, source != .unknown {
+                        Text(source.label)
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
                     }
                     if isStale {
                         Image(systemName: "exclamationmark.triangle.fill")

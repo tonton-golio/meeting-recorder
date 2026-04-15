@@ -2,6 +2,7 @@ import AVFoundation
 import Foundation
 import WhisperKit
 import FluidAudio
+import SpeakerMatchingCore
 
 struct MeetingTranscriptionResult {
     var transcript: String
@@ -226,6 +227,7 @@ class TranscriptionService {
             let sampleStart: Double
             let sampleEnd: Double
             let qualityScore: Float?
+            let captureSource: AudioCaptureSource
         }
 
         let uniqueSpeakers = Set(mergedSegments.map(\.speakerLabel))
@@ -246,12 +248,17 @@ class TranscriptionService {
 
             let window = Self.pickSampleWindow(for: spkId, allSegments: diarizedSegments)
             let quality = speakerSegs.map(\.qualityScore).max()
+            let sourceReport = AudioSourceEnergyClassifier.analyze(
+                finalAudioURL: audioURL,
+                windows: speakerSegs.map { Double($0.startTime)...Double($0.endTime) }
+            )
             candidates.append(SpeakerCandidate(
                 label: label,
                 embedding: embedding,
                 sampleStart: window.start,
                 sampleEnd: window.end,
-                qualityScore: quality
+                qualityScore: quality,
+                captureSource: sourceReport.source
             ))
         }
 
@@ -267,7 +274,11 @@ class TranscriptionService {
         for candidate in candidates {
             for person in allPeople {
                 let score = await MainActor.run {
-                    peopleStore.bestSimilarity(embedding: candidate.embedding, to: person)
+                    peopleStore.bestSimilarity(
+                        embedding: candidate.embedding,
+                        source: candidate.captureSource,
+                        to: person
+                    )
                 }
                 if score >= autoThreshold {
                     allTriples.append(MatchTriple(speakerLabel: candidate.label, person: person, score: score))
@@ -290,7 +301,12 @@ class TranscriptionService {
 
         for candidate in candidates {
             let matchResult = await MainActor.run {
-                peopleStore.matchWithRecommendations(embedding: candidate.embedding, autoThreshold: autoThreshold)
+                peopleStore.matchWithRecommendations(
+                    embedding: candidate.embedding,
+                    source: candidate.captureSource,
+                    autoThreshold: autoThreshold,
+                    recommendThreshold: Preferences.shared.recommendThreshold
+                )
             }
 
             let autoMatch = speakerToMatch[candidate.label]
@@ -314,6 +330,7 @@ class TranscriptionService {
                 sampleStartTime: candidate.sampleStart,
                 sampleEndTime: candidate.sampleEnd,
                 sampleQuality: candidate.qualityScore,
+                captureSource: candidate.captureSource,
                 recommendations: filteredRecs
             ))
         }

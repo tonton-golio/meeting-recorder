@@ -1,4 +1,5 @@
 import AVFoundation
+import SpeakerMatchingCore
 import SwiftUI
 
 struct SpeakerConfirmationView: View {
@@ -106,6 +107,15 @@ struct SpeakerConfirmationRow: View {
                         .overlay(
                             Capsule().strokeBorder(confidenceTint.opacity(0.25), lineWidth: 0.5)
                         )
+                }
+
+                if speaker.captureSource != .unknown {
+                    Text(speaker.captureSource.label)
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.secondary.opacity(0.12), in: Capsule())
                 }
 
                 Spacer()
