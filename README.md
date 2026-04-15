@@ -53,6 +53,7 @@ On first launch, macOS will prompt for two permissions:
 
 See [docs/SPEC.md](docs/SPEC.md) for the full product specification.
 See [docs/SPEAKER_IDENTIFICATION_EXPERIMENTS.md](docs/SPEAKER_IDENTIFICATION_EXPERIMENTS.md) for the source-aware matching experiment plan.
+See [docs/SYSTEM_AUDIO_CAPTURE_EXPERIMENTS.md](docs/SYSTEM_AUDIO_CAPTURE_EXPERIMENTS.md) for system-audio capture diagnostics.
 
 ## Data storage
 

@@ -100,6 +100,31 @@ public struct AudioSourceEnergyReport: Equatable {
     }
 }
 
+public struct AudioEnergySummary: Equatable {
+    public let duration: Double
+    public let meanSquare: Double
+    public let rms: Double
+    public let peak: Double
+    public let activeRatio: Double
+    public let frameCount: Int
+    public let channelCount: Int
+    public let sampleRate: Double
+
+    public var hasAudibleContent: Bool {
+        peak > 0.0005 || rms > 0.0002 || activeRatio > 0.001
+    }
+}
+
+public enum AudioEnergyAnalyzer {
+    public static func summarize(url: URL, activeThreshold: Double = 0.0005) throws -> AudioEnergySummary {
+        try WindowedAudioEnergyAnalyzer(url: url).summarize(activeThreshold: activeThreshold)
+    }
+
+    public static func meanSquare(url: URL, windows: [ClosedRange<Double>]) throws -> Double {
+        try WindowedAudioEnergyAnalyzer(url: url).meanSquare(in: windows)
+    }
+}
+
 public enum AudioSourceEnergyClassifier {
     public static func analyze(
         finalAudioURL: URL,
@@ -108,8 +133,8 @@ public enum AudioSourceEnergyClassifier {
         energyFloor: Double = 1e-9
     ) -> AudioSourceEnergyReport {
         let stems = AudioSourceStemURLs.expectedSiblings(for: finalAudioURL)
-        let micEnergy = stems.existingMicrophoneURL.flatMap { try? WindowedAudioEnergyAnalyzer(url: $0).meanSquare(in: windows) }
-        let systemEnergy = stems.existingSystemURL.flatMap { try? WindowedAudioEnergyAnalyzer(url: $0).meanSquare(in: windows) }
+        let micEnergy = stems.existingMicrophoneURL.flatMap { try? AudioEnergyAnalyzer.meanSquare(url: $0, windows: windows) }
+        let systemEnergy = stems.existingSystemURL.flatMap { try? AudioEnergyAnalyzer.meanSquare(url: $0, windows: windows) }
         let source = classify(
             microphoneEnergy: micEnergy,
             systemEnergy: systemEnergy,
@@ -221,5 +246,66 @@ private final class WindowedAudioEnergyAnalyzer {
 
         guard valueCount > 0 else { return 0 }
         return sumSquares / Double(valueCount)
+    }
+
+    func summarize(activeThreshold: Double) throws -> AudioEnergySummary {
+        file.framePosition = 0
+        var sumSquares = 0.0
+        var peak = 0.0
+        var valueCount = 0
+        var activeCount = 0
+        let active = abs(activeThreshold)
+
+        while file.framePosition < file.length {
+            let remaining = file.length - file.framePosition
+            let framesToRead = min(AVAudioFrameCount(4096), AVAudioFrameCount(remaining))
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: framesToRead) else {
+                break
+            }
+            try file.read(into: buffer, frameCount: framesToRead)
+            let framesRead = Int(buffer.frameLength)
+            guard framesRead > 0 else { break }
+
+            if let floatData = buffer.floatChannelData {
+                for channel in 0..<channelCount {
+                    let samples = floatData[channel]
+                    for frame in 0..<framesRead {
+                        let value = Double(samples[frame])
+                        let magnitude = abs(value)
+                        sumSquares += value * value
+                        peak = max(peak, magnitude)
+                        if magnitude >= active { activeCount += 1 }
+                        valueCount += 1
+                    }
+                }
+            } else if let int16Data = buffer.int16ChannelData {
+                for channel in 0..<channelCount {
+                    let samples = int16Data[channel]
+                    for frame in 0..<framesRead {
+                        let value = Double(samples[frame]) / Double(Int16.max)
+                        let magnitude = abs(value)
+                        sumSquares += value * value
+                        peak = max(peak, magnitude)
+                        if magnitude >= active { activeCount += 1 }
+                        valueCount += 1
+                    }
+                }
+            }
+        }
+
+        let meanSquare = valueCount > 0 ? sumSquares / Double(valueCount) : 0
+        let rms = sqrt(meanSquare)
+        let activeRatio = valueCount > 0 ? Double(activeCount) / Double(valueCount) : 0
+        let frames = max(0, Int(file.length))
+        return AudioEnergySummary(
+            duration: sampleRate > 0 ? Double(frames) / sampleRate : 0,
+            meanSquare: meanSquare,
+            rms: rms,
+            peak: peak,
+            activeRatio: activeRatio,
+            frameCount: frames,
+            channelCount: channelCount,
+            sampleRate: sampleRate
+        )
     }
 }

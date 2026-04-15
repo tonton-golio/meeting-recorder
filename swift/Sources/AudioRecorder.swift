@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import SpeakerMatchingCore
 
 /// Debug logger that writes to a file (macOS GUI apps swallow stdout/stderr).
 func debugLog(_ msg: String) {
@@ -79,6 +80,13 @@ class AudioRecorder: ObservableObject {
         // Assign systemAudio BEFORE startMetering() so the level callback wires up.
         if Preferences.shared.captureSystemAudio, #available(macOS 14.0, *) {
             let capture = SystemAudioCapture()
+            capture.onCaptureIssueDetected = { [weak self] message in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.systemAudioWarning = message
+                    debugLog("[AudioRecorder] System audio issue: \(message)")
+                }
+            }
             systemAudio = capture
             systemAudioURL = sysURL
         }
@@ -91,14 +99,6 @@ class AudioRecorder: ObservableObject {
             Task.detached { [weak self] in
                 do {
                     try await capture.start(outputURL: sysURL)
-                    // Wire up silent-stream watchdog
-                    capture.onSilentStreamDetected = { [weak self] in
-                        Task { @MainActor in
-                            guard let self else { return }
-                            self.systemAudioWarning = "System audio stream started but no audio is being received. Screen Recording permission may need to be re-granted — toggle it off and on in System Settings, then restart the app."
-                            debugLog("[AudioRecorder] Silent stream detected — permission likely stale")
-                        }
-                    }
                     debugLog("[AudioRecorder] System audio capture started successfully")
                 } catch {
                     await MainActor.run {
@@ -138,11 +138,12 @@ class AudioRecorder: ObservableObject {
         try await Task.detached(priority: .userInitiated) {
             if #available(macOS 14.0, *), let capture = sysCapture as? SystemAudioCapture {
                 await capture.stop()
-                // If the stream ran but captured no audible audio, flag it
-                if !capture.capturedAnyAudio {
+                let report = capture.report()
+                debugLog("[AudioRecorder] System audio report: \(report.logLine)")
+                if let warning = report.warningMessage {
                     await MainActor.run {
-                        self.systemAudioWarning = self.systemAudioWarning ?? "System audio captured silence — the remote side may not have been recorded."
-                        debugLog("[AudioRecorder] System audio captured no audible content")
+                        self.systemAudioWarning = self.systemAudioWarning ?? warning
+                        debugLog("[AudioRecorder] \(warning)")
                     }
                 }
             }
@@ -218,13 +219,17 @@ class AudioRecorder: ObservableObject {
     /// infer whether a diarized voice came mostly from mic or system audio.
     private static func produceFinalMix(micURL: URL, sysURL: URL?, finalURL: URL) async {
         let fm = FileManager.default
-        // If SCK didn't produce anything usable, copy mic to final.
-        let hasSys: Bool = {
-            guard let u = sysURL else { return false }
+        let sysSummary: AudioEnergySummary? = {
+            guard let u = sysURL else { return nil }
             guard let attrs = try? fm.attributesOfItem(atPath: u.path),
-                  let size = attrs[.size] as? NSNumber else { return false }
-            return size.intValue > 4096
+                  let size = attrs[.size] as? NSNumber else { return nil }
+            guard size.intValue > 4096 else { return nil }
+            return try? AudioEnergyAnalyzer.summarize(url: u)
         }()
+        if let sysSummary {
+            debugLog("[AudioRecorder] System stem energy: duration=\(String(format: "%.2f", sysSummary.duration))s rms=\(String(format: "%.6f", sysSummary.rms)) peak=\(String(format: "%.6f", sysSummary.peak)) active=\(String(format: "%.3f", sysSummary.activeRatio))")
+        }
+        let hasSys = sysSummary?.hasAudibleContent ?? false
 
         if !hasSys {
             // No system audio — copy mic.wav → final.wav and keep the stem.
@@ -270,9 +275,11 @@ class AudioRecorder: ObservableObject {
 
         let micMono = try Self.readAndResample(file: micFile, to: outFormat)
         let sysMono = try Self.readAndResample(file: sysFile, to: outFormat)
+        let sysGain = Self.systemMixGain(mic: micMono, system: sysMono)
+        debugLog("[AudioRecorder] Mixing mic + system with systemGain=\(String(format: "%.2f", sysGain))")
 
-        // Sum with soft clamp to avoid clipping; system output is usually quieter at the mic
-        // so we keep both at unit gain and clamp.
+        // Sum with soft clamp. System audio can arrive quieter than the mic,
+        // so apply a bounded automatic gain before clamping.
         let n = max(micMono.frameLength, sysMono.frameLength)
         guard let mixed = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: n) else {
             throw RecorderError.failedToMix
@@ -287,12 +294,44 @@ class AudioRecorder: ObservableObject {
         let sysN = Int(sysMono.frameLength)
         for i in 0..<Int(n) {
             let m = i < micN ? micPtr[i] : 0
-            let s = i < sysN ? sysPtr[i] : 0
+            let s = i < sysN ? sysPtr[i] * sysGain : 0
             var v = m + s
             if v > 1.0 { v = 1.0 } else if v < -1.0 { v = -1.0 }
             mixPtr[i] = v
         }
         try outFile.write(from: mixed)
+    }
+
+    private static func systemMixGain(mic: AVAudioPCMBuffer, system: AVAudioPCMBuffer) -> Float {
+        let micStats = bufferStats(mic)
+        let systemStats = bufferStats(system)
+        guard systemStats.rms > 0.0002, systemStats.peak > 0.0005 else { return 1 }
+
+        let targetRMS = max(0.03, min(0.08, micStats.rms * 0.9))
+        let rmsGain = targetRMS / systemStats.rms
+        let peakLimitedGain = 0.90 / max(systemStats.peak, 0.0001)
+        return min(max(1, rmsGain), min(4, peakLimitedGain))
+    }
+
+    private static func bufferStats(_ buffer: AVAudioPCMBuffer) -> (rms: Float, peak: Float) {
+        guard let data = buffer.floatChannelData else { return (0, 0) }
+        let frames = Int(buffer.frameLength)
+        let channels = Int(buffer.format.channelCount)
+        guard frames > 0, channels > 0 else { return (0, 0) }
+        var sumSq: Float = 0
+        var peak: Float = 0
+        var count = 0
+        for channel in 0..<channels {
+            let p = data[channel]
+            for frame in 0..<frames {
+                let value = p[frame]
+                sumSq += value * value
+                peak = max(peak, abs(value))
+                count += 1
+            }
+        }
+        guard count > 0 else { return (0, 0) }
+        return (sqrt(sumSq / Float(count)), peak)
     }
 
     private static func readAndResample(file: AVAudioFile, to outFormat: AVAudioFormat) throws -> AVAudioPCMBuffer {

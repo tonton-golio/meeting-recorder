@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import CoreGraphics
 import Foundation
@@ -15,15 +16,53 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private(set) var outputURL: URL?
     private(set) var isRunning = false
     private var didSeeAnySamples = false
+    private var pcmBufferCount = 0
+    private var conversionFailureCount = 0
+    private var framesWritten = 0
+    private var audibleBufferCount = 0
+    private var maxRMSLevel: Float = 0
+    private var maxPeakLevel: Float = 0
 
     /// Called on the sample queue with the current RMS level (0.0–1.0) each time a buffer arrives.
     var levelCallback: ((Float) -> Void)?
 
-    /// Called if the stream appears to be running but no audio samples have arrived.
-    /// Indicates a likely stale TCC permission or SCK bug.
-    var onSilentStreamDetected: (() -> Void)?
+    /// Called when the stream appears to be running but audio capture itself is unhealthy.
+    var onCaptureIssueDetected: ((String) -> Void)?
 
     private var sampleWatchdog: Task<Void, Never>?
+
+    struct CaptureReport {
+        let callbackCount: Int
+        let pcmBufferCount: Int
+        let conversionFailureCount: Int
+        let framesWritten: Int
+        let audibleBufferCount: Int
+        let maxRMSLevel: Float
+        let maxPeakLevel: Float
+        let outputFileSizeBytes: Int64?
+
+        var capturedAudibleAudio: Bool {
+            audibleBufferCount > 0 || maxPeakLevel > 0.0005
+        }
+
+        var warningMessage: String? {
+            if callbackCount == 0 {
+                return "System audio stream started but no audio buffers arrived. Screen Recording permission may be stale — toggle it off and on in System Settings, then restart the app."
+            }
+            if pcmBufferCount == 0, conversionFailureCount > 0 {
+                return "System audio buffers arrived but could not be decoded. The remote side was not recorded."
+            }
+            if !capturedAudibleAudio {
+                return "System audio captured silence — the remote side may not have been recorded."
+            }
+            return nil
+        }
+
+        var logLine: String {
+            let size = outputFileSizeBytes.map(String.init) ?? "missing"
+            return "callbacks=\(callbackCount) pcm=\(pcmBufferCount) conversionFailures=\(conversionFailureCount) frames=\(framesWritten) audibleBuffers=\(audibleBufferCount) maxRMS=\(String(format: "%.5f", maxRMSLevel)) maxPeak=\(String(format: "%.5f", maxPeakLevel)) fileBytes=\(size)"
+        }
+    }
 
     /// Start capturing system audio into `url`. Throws if permissions are missing or setup fails.
     func start(outputURL url: URL) async throws {
@@ -42,9 +81,10 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         debugLog("[SystemAudioCapture] Starting — requesting shareable content...")
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         debugLog("[SystemAudioCapture] Got content: \(content.displays.count) displays, \(content.applications.count) apps")
-        guard let display = content.displays.first else {
+        guard let display = Self.preferredDisplay(from: content) else {
             throw CaptureError.noDisplays
         }
+        debugLog("[SystemAudioCapture] Selected display \(display.displayID) for capture filter")
         let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
 
         let config = SCStreamConfiguration()
@@ -73,9 +113,16 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         // silently failing (common with stale TCC grants from ad-hoc re-signing).
         sampleWatchdog = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 4_000_000_000)
-            guard let self, self.isRunning, self.audioFile == nil else { return }
-            debugLog("[SystemAudioCapture] WARNING: No audio samples received after 4 seconds — stream is silent")
-            self.onSilentStreamDetected?()
+            guard let self, self.isRunning else { return }
+            if self.callbackCount == 0 {
+                let message = "System audio stream started but no audio buffers arrived after 4 seconds"
+                debugLog("[SystemAudioCapture] WARNING: \(message)")
+                self.onCaptureIssueDetected?(message)
+            } else if self.pcmBufferCount == 0, self.conversionFailureCount > 0 {
+                let message = "System audio buffers arrived but PCM conversion is failing"
+                debugLog("[SystemAudioCapture] WARNING: \(message)")
+                self.onCaptureIssueDetected?(message)
+            }
         }
     }
 
@@ -93,6 +140,24 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// Returns true if at least one audio sample was seen during the capture.
     var capturedAnyAudio: Bool { didSeeAnySamples }
+
+    func report() -> CaptureReport {
+        let size: Int64? = outputURL.flatMap { url in
+            guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+                  let value = attrs[.size] as? NSNumber else { return nil }
+            return value.int64Value
+        }
+        return CaptureReport(
+            callbackCount: callbackCount,
+            pcmBufferCount: pcmBufferCount,
+            conversionFailureCount: conversionFailureCount,
+            framesWritten: framesWritten,
+            audibleBufferCount: audibleBufferCount,
+            maxRMSLevel: maxRMSLevel,
+            maxPeakLevel: maxPeakLevel,
+            outputFileSizeBytes: size
+        )
+    }
 
     // MARK: - SCStreamOutput
 
@@ -115,31 +180,29 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         guard type == .audio, CMSampleBufferDataIsReady(sampleBuffer) else { return }
         guard let outputURL = outputURL else { return }
 
-        // Lazily create AVAudioFile using the first sample's format
-        if audioFile == nil {
-            guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer),
-                  let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc)?.pointee else {
-                return
+        guard let pcmBuffer = Self.pcmBuffer(from: sampleBuffer) else {
+            conversionFailureCount += 1
+            if callbackCount <= 5 {
+                debugLog("[SystemAudioCapture] pcmBuffer conversion FAILED for callback #\(callbackCount)")
             }
-            let fmt = AVAudioFormat(
-                commonFormat: .pcmFormatFloat32,
-                sampleRate: asbd.mSampleRate,
-                channels: AVAudioChannelCount(asbd.mChannelsPerFrame),
-                interleaved: false
-            )
-            guard let format = fmt else { return }
+            return
+        }
+        pcmBufferCount += 1
+        framesWritten += Int(pcmBuffer.frameLength)
+        if callbackCount <= 3 {
+            debugLog("[SystemAudioCapture] pcmBuffer OK: frames=\(pcmBuffer.frameLength) channels=\(pcmBuffer.format.channelCount)")
+        }
+        let rms = Self.rmsLevel(pcmBuffer)
+        let peak = Self.peakLevel(pcmBuffer)
+        maxRMSLevel = max(maxRMSLevel, rms)
+        maxPeakLevel = max(maxPeakLevel, peak)
+        if Self.hasAudibleContent(pcmBuffer) {
+            audibleBufferCount += 1
+            didSeeAnySamples = true
+        }
+        if audioFile == nil {
             do {
-                let settings: [String: Any] = [
-                    AVFormatIDKey: Int(kAudioFormatLinearPCM),
-                    AVSampleRateKey: asbd.mSampleRate,
-                    AVNumberOfChannelsKey: Int(asbd.mChannelsPerFrame),
-                    AVLinearPCMBitDepthKey: 16,
-                    AVLinearPCMIsFloatKey: false,
-                    AVLinearPCMIsBigEndianKey: false,
-                    AVLinearPCMIsNonInterleaved: false,
-                ]
-                audioFile = try AVAudioFile(forWriting: outputURL, settings: settings, commonFormat: format.commonFormat, interleaved: format.isInterleaved)
-                // First audio sample arrived — cancel the watchdog
+                audioFile = try AVAudioFile(forWriting: outputURL, settings: pcmBuffer.format.settings)
                 sampleWatchdog?.cancel()
                 sampleWatchdog = nil
             } catch {
@@ -147,25 +210,12 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 return
             }
         }
-
-        guard let pcmBuffer = Self.pcmBuffer(from: sampleBuffer) else {
-            if callbackCount <= 5 {
-                debugLog("[SystemAudioCapture] pcmBuffer conversion FAILED for callback #\(callbackCount)")
-            }
-            return
-        }
-        if callbackCount <= 3 {
-            debugLog("[SystemAudioCapture] pcmBuffer OK: frames=\(pcmBuffer.frameLength) channels=\(pcmBuffer.format.channelCount)")
-        }
-        if !didSeeAnySamples, Self.hasAudibleContent(pcmBuffer) {
-            didSeeAnySamples = true
-        }
         do { try audioFile?.write(from: pcmBuffer) } catch {
             debugLog("[SystemAudioCapture] write error: \(error)")
         }
 
         if let cb = levelCallback {
-            cb(Self.rmsLevel(pcmBuffer))
+            cb(rms)
         }
     }
 
@@ -194,14 +244,15 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         pcm.frameLength = AVAudioFrameCount(numSamples)
 
-        // Allocate an AudioBufferList sized for the actual channel count.
-        // Non-interleaved stereo needs room for 2 AudioBuffers; a stack-declared
-        // AudioBufferList only has room for 1, so the API returns kCMSampleBufferError_ArrayTooSmall.
+        let isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
+        let isNonInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
+        let bitsPerChannel = Int(asbd.mBitsPerChannel)
         let channelCount = Int(fmt.channelCount)
-        let ablPtr = AudioBufferList.allocate(maximumBuffers: channelCount)
+        let inputBufferCount = isNonInterleaved ? channelCount : 1
+        let ablPtr = AudioBufferList.allocate(maximumBuffers: inputBufferCount)
         defer { free(ablPtr.unsafeMutablePointer) }
         let ablSize = MemoryLayout<AudioBufferList>.size
-            + (max(channelCount, 1) - 1) * MemoryLayout<AudioBuffer>.stride
+            + (max(inputBufferCount, 1) - 1) * MemoryLayout<AudioBuffer>.stride
 
         var blockBuffer: CMBlockBuffer?
         let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
@@ -216,11 +267,37 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         )
         guard status == noErr else { return nil }
 
-        for i in 0..<min(channelCount, ablPtr.count) {
-            guard let src = ablPtr[i].mData,
-                  let dstBuffers = pcm.floatChannelData else { continue }
-            let frames = Int(pcm.frameLength)
-            memcpy(dstBuffers[i], src, frames * MemoryLayout<Float>.size)
+        guard let dstBuffers = pcm.floatChannelData else { return nil }
+        let frames = Int(pcm.frameLength)
+
+        if isFloat, isNonInterleaved {
+            for channel in 0..<min(channelCount, ablPtr.count) {
+                guard let src = ablPtr[channel].mData?.assumingMemoryBound(to: Float.self) else { continue }
+                memcpy(dstBuffers[channel], src, frames * MemoryLayout<Float>.size)
+            }
+        } else if isFloat {
+            guard let src = ablPtr[0].mData?.assumingMemoryBound(to: Float.self) else { return nil }
+            for frame in 0..<frames {
+                for channel in 0..<channelCount {
+                    dstBuffers[channel][frame] = src[frame * channelCount + channel]
+                }
+            }
+        } else if bitsPerChannel == 16, isNonInterleaved {
+            for channel in 0..<min(channelCount, ablPtr.count) {
+                guard let src = ablPtr[channel].mData?.assumingMemoryBound(to: Int16.self) else { continue }
+                for frame in 0..<frames {
+                    dstBuffers[channel][frame] = Float(src[frame]) / Float(Int16.max)
+                }
+            }
+        } else if bitsPerChannel == 16 {
+            guard let src = ablPtr[0].mData?.assumingMemoryBound(to: Int16.self) else { return nil }
+            for frame in 0..<frames {
+                for channel in 0..<channelCount {
+                    dstBuffers[channel][frame] = Float(src[frame * channelCount + channel]) / Float(Int16.max)
+                }
+            }
+        } else {
+            return nil
         }
         return pcm
     }
@@ -253,6 +330,53 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             }
         }
         return false
+    }
+
+    private static func peakLevel(_ buffer: AVAudioPCMBuffer) -> Float {
+        guard let data = buffer.floatChannelData else { return 0 }
+        let frames = Int(buffer.frameLength)
+        let channels = Int(buffer.format.channelCount)
+        guard frames > 0 else { return 0 }
+        var peak: Float = 0
+        for c in 0..<channels {
+            let p = data[c]
+            for i in stride(from: 0, to: frames, by: 16) {
+                peak = max(peak, abs(p[i]))
+            }
+        }
+        return min(1.0, peak)
+    }
+
+    private static func preferredDisplay(from content: SCShareableContent) -> SCDisplay? {
+        let displays = content.displays
+        guard !displays.isEmpty else { return nil }
+        let displayIDs = displays.map { String($0.displayID) }.joined(separator: ",")
+        debugLog("[SystemAudioCapture] Available display IDs: \(displayIDs)")
+
+        if let mouseDisplayID = displayIDContainingMouse(),
+           let display = displays.first(where: { $0.displayID == mouseDisplayID }) {
+            debugLog("[SystemAudioCapture] Mouse is on display \(mouseDisplayID)")
+            return display
+        }
+
+        let mainDisplayID = CGMainDisplayID()
+        if let display = displays.first(where: { $0.displayID == mainDisplayID }) {
+            debugLog("[SystemAudioCapture] Falling back to main display \(mainDisplayID)")
+            return display
+        }
+
+        return displays.first
+    }
+
+    private static func displayIDContainingMouse() -> CGDirectDisplayID? {
+        let mouse = NSEvent.mouseLocation
+        for screen in NSScreen.screens where NSMouseInRect(mouse, screen.frame, false) {
+            let key = NSDeviceDescriptionKey("NSScreenNumber")
+            if let value = screen.deviceDescription[key] as? NSNumber {
+                return CGDirectDisplayID(value.uint32Value)
+            }
+        }
+        return nil
     }
 
     enum CaptureError: LocalizedError {

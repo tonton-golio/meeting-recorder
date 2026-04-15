@@ -30,6 +30,114 @@ func energyString(_ value: Double?) -> String {
     return String(format: "%.6e", value)
 }
 
+func fileSizeString(_ url: URL?) -> String {
+    guard let url,
+          let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+          let size = attrs[.size] as? NSNumber else { return "missing" }
+    let bytes = size.doubleValue
+    if bytes > 1_000_000 { return String(format: "%.1f MB", bytes / 1_000_000) }
+    if bytes > 1_000 { return String(format: "%.1f KB", bytes / 1_000) }
+    return "\(Int(bytes)) B"
+}
+
+func summaryString(_ summary: AudioEnergySummary?) -> String {
+    guard let summary else { return "missing" }
+    return String(
+        format: "dur=%6.1fs rms=%.6f peak=%.5f active=%5.1f%%",
+        summary.duration,
+        summary.rms,
+        summary.peak,
+        summary.activeRatio * 100
+    )
+}
+
+func dbRatio(numerator: Double, denominator: Double) -> String {
+    guard numerator > 0, denominator > 0 else { return "n/a" }
+    return String(format: "%+.1f dB", 20 * log10(numerator / denominator))
+}
+
+func runCaptureAudit(arguments: [String]) {
+    let fm = FileManager.default
+    let recordingsDir = URL(fileURLWithPath: NSHomeDirectory() + "/.meeting-recorder/recordings")
+    let target = arguments.first.map { URL(fileURLWithPath: $0) } ?? recordingsDir
+
+    let finalURLs: [URL]
+    var isDir: ObjCBool = false
+    if fm.fileExists(atPath: target.path, isDirectory: &isDir), isDir.boolValue {
+        let files = (try? fm.contentsOfDirectory(
+            at: target,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        finalURLs = files
+            .filter {
+                $0.pathExtension == "wav"
+                    && !$0.deletingPathExtension().lastPathComponent.hasSuffix(".mic")
+                    && !$0.deletingPathExtension().lastPathComponent.hasSuffix(".sys")
+            }
+            .sorted {
+                let a = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let b = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return a > b
+            }
+            .prefix(25)
+            .map { $0 }
+    } else if fm.fileExists(atPath: target.path) {
+        finalURLs = [target]
+    } else {
+        print("ERROR: target not found: \(target.path)")
+        exit(1)
+    }
+
+    var output = "System Audio Capture Audit\n"
+    output += "Target: \(target.path)\n"
+    output += "Files: \(finalURLs.count)\n\n"
+    output += "This audit reads final/mic/system WAVs and reports whether the system stem contains audible audio.\n\n"
+
+    for finalURL in finalURLs {
+        let stems = AudioSourceStemURLs.expectedSiblings(for: finalURL)
+        let micURL = stems.existingMicrophoneURL
+        let sysURL = stems.existingSystemURL
+        let finalSummary = try? AudioEnergyAnalyzer.summarize(url: finalURL)
+        let micSummary = micURL.flatMap { try? AudioEnergyAnalyzer.summarize(url: $0) }
+        let sysSummary = sysURL.flatMap { try? AudioEnergyAnalyzer.summarize(url: $0) }
+
+        output += "=== \(finalURL.lastPathComponent) ===\n"
+        output += "final  \(fileSizeString(finalURL))  \(summaryString(finalSummary))\n"
+        output += "mic    \(fileSizeString(micURL))  \(summaryString(micSummary))\n"
+        output += "system \(fileSizeString(sysURL))  \(summaryString(sysSummary))\n"
+
+        let diagnosis: String
+        if sysURL == nil {
+            diagnosis = "missing system stem: ScreenCaptureKit did not write a side-channel file"
+        } else if let sysSummary, !sysSummary.hasAudibleContent {
+            diagnosis = "system stem is silent: permission/output/app routing likely failed or nobody remote spoke"
+        } else if let mic = micSummary, let sys = sysSummary, sys.rms > 0 {
+            let relative = dbRatio(numerator: sys.rms, denominator: mic.rms)
+            if sys.rms < max(0.001, mic.rms * 0.25) {
+                diagnosis = "system stem is audible but much quieter than mic (\(relative)); automatic system gain should help"
+            } else {
+                diagnosis = "system stem looks audible (\(relative) vs mic)"
+            }
+        } else {
+            diagnosis = "inconclusive"
+        }
+        output += "diagnosis: \(diagnosis)\n\n"
+    }
+
+    let df = DateFormatter()
+    df.dateFormat = "yyyyMMdd_HHmmss"
+    let path = (resultsDir as NSString).appendingPathComponent("capture-audit-\(df.string(from: Date())).txt")
+    do {
+        try output.write(toFile: path, atomically: true, encoding: .utf8)
+        print(output)
+        print("Saved: \(path)")
+    } catch {
+        print("ERROR: could not save audit: \(error)")
+        print(output)
+    }
+}
+
 func runSourceAudit(audioURL: URL) async {
     guard FileManager.default.fileExists(atPath: audioURL.path) else {
         print("ERROR: Audio file not found: \(audioURL.path)")
@@ -101,6 +209,11 @@ func runSourceAudit(audioURL: URL) async {
 
 Task {
     let args = Array(CommandLine.arguments.dropFirst())
+    if args.first == "capture-audit" {
+        runCaptureAudit(arguments: Array(args.dropFirst()))
+        exit(0)
+    }
+
     if args.first == "source-audit" {
         guard args.count >= 2 else {
             print("Usage: swift run Experiments source-audit /path/to/recording.wav")

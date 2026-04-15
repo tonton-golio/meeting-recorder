@@ -42,6 +42,10 @@ For recordings that capture both microphone and system audio, the app keeps the 
 
 Voice samples store this capture source. Matching remains max-over-samples cosine matching, but uses source as a light tie-breaker: same-source samples get a small boost, mic-vs-system mismatches get a small penalty, and unknown-source samples are left unchanged.
 
+### System-audio reliability
+
+System audio capture prefers the display containing the mouse, then the main display, to avoid accidentally binding ScreenCaptureKit to the wrong display in multi-monitor setups. Each capture logs a diagnostic report with audio-buffer counts, conversion failures, peak/RMS levels, and output file size. When a system stem is audible but quieter than the microphone, the offline mix applies bounded automatic gain to make remote speakers easier for transcription to hear.
+
 ### Sample selection
 When a voice sample is created from a recording, the app picks the longest segment where only that speaker was active (no cross-talk), clamped to 3–15 seconds, trimming the first 0.5s to skip utterance onsets. The embedding stored with the sample is the diarizer's session centroid for that speaker when available — more stable than any single window.
 
