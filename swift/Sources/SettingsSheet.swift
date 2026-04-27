@@ -10,6 +10,7 @@ struct SettingsSheet: View {
     @AppStorage("autoTranscribe") private var autoTranscribe = true
     @AppStorage("autoSave") private var autoSave = true
     @AppStorage("captureSystemAudio") private var captureSystemAudio = true
+    @AppStorage("voiceProcessingEnabled") private var voiceProcessingEnabled = false
     @AppStorage("meetingsPath") private var meetingsPath = ""
     @AppStorage("recordingsPath") private var recordingsPath = ""
     @AppStorage("peoplePagesPath") private var peoplePagesPath = ""
@@ -98,6 +99,12 @@ struct SettingsSheet: View {
                         Toggle("Capture system audio (both sides of calls)", isOn: $captureSystemAudio)
                             .onChange(of: captureSystemAudio) { _, val in Preferences.shared.captureSystemAudio = val }
                         Text("Requires Screen Recording permission (macOS will prompt on first recording). When off, only the microphone is captured.")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+
+                        Toggle("Cancel speaker echo (for speaker-on meetings)", isOn: $voiceProcessingEnabled)
+                            .onChange(of: voiceProcessingEnabled) { _, val in Preferences.shared.voiceProcessingEnabled = val }
+                        Text("Routes the mic through Apple's voice-processing engine (echo cancellation + noise suppression). Use this when you're on a call without headphones so the remote participants' voices don't bleed back into your mic recording. Off by default — has no effect when you're using headphones.")
                             .font(.system(size: 10))
                             .foregroundStyle(.tertiary)
                     }
