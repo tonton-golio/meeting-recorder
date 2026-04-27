@@ -113,12 +113,33 @@ struct RecordingDetailView: View {
                         }
                         .onExitCommand { editingTitle = false }
                 } else {
-                    Text(entry.title)
+                    HStack(spacing: 6) {
+                        Group {
+                            if entry.title.isEmpty {
+                                Text("Untitled")
+                                    .italic()
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Text(entry.title)
+                            }
+                        }
                         .font(.title2.weight(.semibold))
-                        .onTapGesture(count: 2) {
+
+                        Button {
                             editedTitle = entry.title
                             editingTitle = true
+                        } label: {
+                            Image(systemName: "pencil")
+                                .foregroundStyle(.secondary)
                         }
+                        .buttonStyle(.plain)
+                        .help("Edit title")
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture(count: 2) {
+                        editedTitle = entry.title
+                        editingTitle = true
+                    }
                 }
 
                 HStack(spacing: 8) {
