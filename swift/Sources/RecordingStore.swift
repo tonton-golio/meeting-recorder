@@ -71,7 +71,7 @@ class RecordingStore: ObservableObject {
         scheduleSave()
     }
 
-    func update(id: String, transcript: String? = nil, status: String? = nil, duration: Double? = nil, language: String?? = nil, notes: String?? = nil, rawSegmentsJSON: String?? = nil, unresolvedSpeakersJSON: String?? = nil) {
+    func update(id: String, transcript: String? = nil, status: String? = nil, duration: Double? = nil, language: String?? = nil, notes: String?? = nil, rawSegmentsJSON: String?? = nil, unresolvedSpeakersJSON: String?? = nil, mergedSegmentsJSON: String?? = nil) {
         guard let idx = recordings.firstIndex(where: { $0.id == id }) else { return }
         if let t = transcript { recordings[idx].transcript = t }
         if let s = status { recordings[idx].status = s }
@@ -80,6 +80,7 @@ class RecordingStore: ObservableObject {
         if let n = notes { recordings[idx].notes = n }
         if let r = rawSegmentsJSON { recordings[idx].rawSegmentsJSON = r }
         if let u = unresolvedSpeakersJSON { recordings[idx].unresolvedSpeakersJSON = u }
+        if let m = mergedSegmentsJSON { recordings[idx].mergedSegmentsJSON = m }
         scheduleSave()
     }
 

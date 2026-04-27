@@ -412,7 +412,14 @@ class AppState: ObservableObject {
             transcribeStep = .done
             statusMessage = ""
             pendingSpeakers = result.detectedSpeakers
-            recordingStore.update(id: rec.id, transcript: result.transcript, status: "transcribed", rawSegmentsJSON: .some(nil))
+            let segJSON = encodePersistedSegments(result.mergedSegments)
+            recordingStore.update(
+                id: rec.id,
+                transcript: result.transcript,
+                status: "transcribed",
+                rawSegmentsJSON: .some(nil),
+                mergedSegmentsJSON: .some(segJSON)
+            )
             persistUnresolvedSpeakers(for: rec.id)
 
             // Auto-save only if no speakers need confirmation
@@ -470,7 +477,14 @@ class AppState: ObservableObject {
             transcribeStep = .done
             statusMessage = ""
             pendingSpeakers = result.detectedSpeakers
-            recordingStore.update(id: rec.id, transcript: result.transcript, status: "transcribed", rawSegmentsJSON: .some(nil))
+            let segJSON = encodePersistedSegments(result.mergedSegments)
+            recordingStore.update(
+                id: rec.id,
+                transcript: result.transcript,
+                status: "transcribed",
+                rawSegmentsJSON: .some(nil),
+                mergedSegmentsJSON: .some(segJSON)
+            )
             persistUnresolvedSpeakers(for: rec.id)
 
             if Preferences.shared.autoSave && pendingSpeakers.isEmpty {
@@ -729,6 +743,148 @@ class AppState: ObservableObject {
         if Preferences.shared.autoSave && pendingSpeakers.isEmpty {
             Task { await runSave() }
         }
+    }
+
+    // MARK: - Per-Segment Reassignment
+
+    /// Where a segment should be reassigned to. Used by `reassignSegments`.
+    enum SegmentReassignTarget {
+        /// Just relabel the segment — no Person attribution, no learning.
+        /// (e.g. the user wants to merge "Speaker 0" into "Speaker 1".)
+        case existingSpeakerName(String)
+        /// Attribute to an existing Person and add a corrected voice sample.
+        case existingPerson(Person)
+        /// Create a new Person from the audio range and attribute the segment.
+        case newPerson(name: String)
+    }
+
+    /// Load the persisted merged-segments snapshot for a recording, if any.
+    func loadPersistedSegments(for entry: RecordingEntry) -> [PersistedSegment]? {
+        guard let json = entry.mergedSegmentsJSON,
+              let data = json.data(using: .utf8),
+              let segments = try? JSONDecoder().decode([PersistedSegment].self, from: data) else {
+            return nil
+        }
+        return segments
+    }
+
+    /// True when the recording has a usable per-segment snapshot. The detail
+    /// view uses this to decide whether to show the reassignment UI.
+    func canReassignSegments(for entry: RecordingEntry) -> Bool {
+        guard let segments = loadPersistedSegments(for: entry) else { return false }
+        return !segments.isEmpty
+    }
+
+    fileprivate func encodePersistedSegments(_ segments: [PersistedSegment]) -> String? {
+        guard !segments.isEmpty else { return nil }
+        guard let data = try? JSONEncoder().encode(segments) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// Reassign one or more segments (by `index`) to a new speaker. Re-renders
+    /// the transcript, re-saves the recording, and — for Person targets —
+    /// extracts an audio sample and adds it to the Person's voice profile so
+    /// the matcher learns from the correction.
+    func reassignSegments(_ indices: Set<Int>, to target: SegmentReassignTarget) async {
+        guard let rec = selectedRecording else { return }
+        guard var segments = loadPersistedSegments(for: rec), !segments.isEmpty else { return }
+
+        let touched = indices.compactMap { idx -> PersistedSegment? in
+            segments.first(where: { $0.index == idx })
+        }
+        guard !touched.isEmpty else { return }
+
+        let learnStart = touched.map(\.startTime).min() ?? 0
+        let learnEnd = touched.map(\.endTime).max() ?? 0
+        let audioURL = URL(fileURLWithPath: Preferences.shared.recordingsPath)
+            .appendingPathComponent(rec.filename)
+
+        // Resolve the target into (newName, personID, optional learn task).
+        let newName: String
+        var newPersonID: UUID?
+
+        switch target {
+        case .existingSpeakerName(let name):
+            newName = name
+            newPersonID = peopleStore.personWithName(name)?.id
+        case .existingPerson(let person):
+            newName = person.name
+            newPersonID = person.id
+            statusMessage = "Adding voice sample to \(person.name)…"
+            do {
+                let dia = try await transcriptionService.prepareDiarizer()
+                _ = await peopleStore.learnSampleFromAudioRange(
+                    person: person,
+                    audioURL: audioURL,
+                    startTime: learnStart,
+                    endTime: learnEnd,
+                    captureSource: nil,
+                    using: dia
+                )
+            } catch {
+                NSLog("[AppState] reassign learn failed: \(error)")
+            }
+            statusMessage = ""
+        case .newPerson(let name):
+            let trimmed = name.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else { return }
+            newName = trimmed
+            statusMessage = "Creating \(trimmed)…"
+            do {
+                let dia = try await transcriptionService.prepareDiarizer()
+                if let created = await peopleStore.learnNewPersonFromAudioRange(
+                    name: trimmed,
+                    audioURL: audioURL,
+                    startTime: learnStart,
+                    endTime: learnEnd,
+                    captureSource: nil,
+                    using: dia
+                ) {
+                    newPersonID = created.id
+                }
+            } catch {
+                NSLog("[AppState] reassign new-person failed: \(error)")
+            }
+            statusMessage = ""
+        }
+
+        // Update the segment list in place.
+        for i in segments.indices where indices.contains(segments[i].index) {
+            segments[i].speaker = newName
+            segments[i].personID = newPersonID
+        }
+
+        // Re-render transcript text and persist both.
+        let newTranscript = TranscriptionService.formatTranscriptText(from: segments)
+        transcript = newTranscript
+        let segJSON = encodePersistedSegments(segments)
+        recordingStore.update(
+            id: rec.id,
+            transcript: newTranscript,
+            mergedSegmentsJSON: .some(segJSON)
+        )
+        markDirty()
+        checkAutoSave()
+    }
+
+    /// Distinct speaker names currently used in the segment list, in
+    /// first-occurrence order. Drives the "Move to existing speaker" submenu.
+    func distinctSpeakerNames(for entry: RecordingEntry) -> [String] {
+        guard let segments = loadPersistedSegments(for: entry) else { return [] }
+        var seen = Set<String>()
+        var ordered: [String] = []
+        for seg in segments where !seen.contains(seg.speaker) {
+            seen.insert(seg.speaker)
+            ordered.append(seg.speaker)
+        }
+        return ordered
+    }
+
+    /// Drop the per-segment snapshot. Called from RecordingDetailView when the
+    /// user manually edits the transcript text — segment timings can no longer
+    /// be trusted to match the new text, so we hide the reassignment UI.
+    func invalidateSegmentSnapshot(for recordingID: String) {
+        recordingStore.update(id: recordingID, mergedSegmentsJSON: .some(nil))
     }
 
     // MARK: - Dirty Tracking
