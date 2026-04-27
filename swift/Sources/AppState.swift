@@ -413,6 +413,7 @@ class AppState: ObservableObject {
             statusMessage = ""
             pendingSpeakers = result.detectedSpeakers
             recordingStore.update(id: rec.id, transcript: result.transcript, status: "transcribed", rawSegmentsJSON: .some(nil))
+            persistUnresolvedSpeakers(for: rec.id)
 
             // Auto-save only if no speakers need confirmation
             if Preferences.shared.autoSave && pendingSpeakers.isEmpty {
@@ -470,6 +471,7 @@ class AppState: ObservableObject {
             statusMessage = ""
             pendingSpeakers = result.detectedSpeakers
             recordingStore.update(id: rec.id, transcript: result.transcript, status: "transcribed", rawSegmentsJSON: .some(nil))
+            persistUnresolvedSpeakers(for: rec.id)
 
             if Preferences.shared.autoSave && pendingSpeakers.isEmpty {
                 await runSave()
@@ -534,6 +536,7 @@ class AppState: ObservableObject {
 
         // Name is already correct in transcript
         pendingSpeakers.removeAll { $0.id == speaker.id }
+        persistUnresolvedSpeakers(for: rec.id)
         checkAutoSave()
     }
 
@@ -593,6 +596,7 @@ class AppState: ObservableObject {
             recordingStore.update(id: id, transcript: transcript)
         }
         pendingSpeakers.removeAll { $0.id == speaker.id }
+        persistUnresolvedSpeakers(for: rec.id)
         markDirty()
         checkAutoSave()
     }
@@ -624,6 +628,7 @@ class AppState: ObservableObject {
             recordingStore.update(id: id, transcript: transcript)
         }
         pendingSpeakers.removeAll { $0.id == speaker.id }
+        persistUnresolvedSpeakers(for: rec.id)
         markDirty()
         checkAutoSave()
     }
@@ -631,6 +636,9 @@ class AppState: ObservableObject {
     func skipSpeaker(_ speaker: DetectedSpeaker) {
         pendingSpeakers.removeAll { $0.id == speaker.id }
         skippedSpeakers.append(speaker)
+        if let id = selectedRecordingID {
+            persistUnresolvedSpeakers(for: id)
+        }
         checkAutoSave()
     }
 
@@ -638,6 +646,82 @@ class AppState: ObservableObject {
     func repromptSkippedSpeakers() {
         pendingSpeakers.append(contentsOf: skippedSpeakers)
         skippedSpeakers.removeAll()
+    }
+
+    // MARK: - Speaker Persistence (re-open tagging later)
+
+    /// Persist the current pending+skipped speaker list onto the selected
+    /// recording's `unresolvedSpeakersJSON`, so the user can re-open the
+    /// confirmation UI from the detail view after navigating away.
+    /// Resolved speakers (already removed from both lists) are not persisted.
+    private func persistUnresolvedSpeakers(for recordingID: String) {
+        let unresolved = pendingSpeakers + skippedSpeakers
+        let encoded: String? = {
+            guard !unresolved.isEmpty else { return nil }
+            let snapshot = unresolved.map(PersistedSpeaker.init(from:))
+            guard let data = try? JSONEncoder().encode(snapshot) else { return nil }
+            return String(data: data, encoding: .utf8)
+        }()
+        recordingStore.update(id: recordingID, unresolvedSpeakersJSON: .some(encoded))
+    }
+
+    /// Re-open the speaker confirmation UI for the selected recording, using
+    /// the persisted speaker snapshot. Recommendations and auto-matches are
+    /// recomputed against the current PeopleStore so newly added people are
+    /// considered.
+    func reopenSpeakerTagging() {
+        guard let rec = selectedRecording,
+              let json = rec.unresolvedSpeakersJSON,
+              let data = json.data(using: .utf8),
+              let snapshot = try? JSONDecoder().decode([PersistedSpeaker].self, from: data),
+              !snapshot.isEmpty else {
+            return
+        }
+
+        let autoThreshold = Preferences.shared.autoMatchThreshold
+        let recommendThreshold = Preferences.shared.recommendThreshold
+
+        let restored: [DetectedSpeaker] = snapshot.map { persisted in
+            let result = peopleStore.matchWithRecommendations(
+                embedding: persisted.embedding,
+                source: persisted.captureSource,
+                autoThreshold: autoThreshold,
+                recommendThreshold: recommendThreshold
+            )
+            let matchScore: Float? = result.match.map { person in
+                peopleStore.bestSimilarity(
+                    embedding: persisted.embedding,
+                    source: persisted.captureSource,
+                    to: person
+                )
+            }
+            return DetectedSpeaker(
+                label: persisted.label,
+                embedding: persisted.embedding,
+                matchedPerson: result.match,
+                matchScore: matchScore,
+                assignedName: persisted.assignedName,
+                sampleStartTime: persisted.sampleStartTime,
+                sampleEndTime: persisted.sampleEndTime,
+                sampleQuality: persisted.sampleQuality,
+                captureSource: persisted.captureSource,
+                recommendations: result.recommendations
+            )
+        }
+
+        pendingSpeakers = restored
+        skippedSpeakers = []
+    }
+
+    /// Number of unresolved (still-pending or skipped) speakers persisted on
+    /// this recording. Drives whether the "Tag speakers" button is shown.
+    func unresolvedSpeakerCount(for entry: RecordingEntry) -> Int {
+        guard let json = entry.unresolvedSpeakersJSON,
+              let data = json.data(using: .utf8),
+              let snapshot = try? JSONDecoder().decode([PersistedSpeaker].self, from: data) else {
+            return 0
+        }
+        return snapshot.count
     }
 
     private func checkAutoSave() {

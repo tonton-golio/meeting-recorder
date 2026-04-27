@@ -150,6 +150,18 @@ struct RecordingDetailView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .help("Re-prompt \(state.skippedSpeakers.count) skipped speaker(s)")
+            } else if state.pendingSpeakers.isEmpty {
+                let unresolvedCount = state.unresolvedSpeakerCount(for: entry)
+                if unresolvedCount > 0 {
+                    Button {
+                        state.reopenSpeakerTagging()
+                    } label: {
+                        Label("Tag \(unresolvedCount) speaker\(unresolvedCount == 1 ? "" : "s")", systemImage: "person.badge.clock")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("Re-open speaker confirmation for this recording")
+                }
             }
 
             HStack(spacing: 6) {
