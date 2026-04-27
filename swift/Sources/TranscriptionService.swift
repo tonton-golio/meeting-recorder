@@ -7,6 +7,9 @@ import SpeakerMatchingCore
 struct MeetingTranscriptionResult {
     var transcript: String
     var detectedSpeakers: [DetectedSpeaker]
+    /// Per-segment view of the transcript with resolved speaker names.
+    /// Persisted on RecordingEntry to power per-segment reassignment.
+    var mergedSegments: [PersistedSegment]
 }
 
 /// Intermediate result after the WhisperKit ASR pass but before diarization.
@@ -335,12 +338,37 @@ class TranscriptionService {
             ))
         }
 
-        let transcript = formatTranscript(mergedSegments, speakerNames: speakerNameMap)
+        let displayReady = mergeConsecutiveSameSpeaker(mergedSegments)
+            .filter { !$0.text.isEmpty }
+        let mergedDisplay: [PersistedSegment] = displayReady.enumerated().map { idx, seg in
+            PersistedSegment(
+                index: idx,
+                startTime: Double(seg.startTime),
+                endTime: Double(seg.endTime),
+                text: seg.text,
+                speaker: speakerNameMap[seg.speakerLabel] ?? seg.speakerLabel,
+                personID: nil
+            )
+        }
+
+        let transcript = TranscriptionService.formatTranscriptText(from: mergedDisplay)
 
         return MeetingTranscriptionResult(
             transcript: transcript,
-            detectedSpeakers: detectedSpeakers
+            detectedSpeakers: detectedSpeakers,
+            mergedSegments: mergedDisplay
         )
+    }
+
+    /// Re-render the transcript text from a `[PersistedSegment]` snapshot.
+    /// Public so AppState can call it after the user reassigns segments.
+    static func formatTranscriptText(from segments: [PersistedSegment]) -> String {
+        return segments.compactMap { seg in
+            guard !seg.text.isEmpty else { return nil }
+            let m = Int(seg.startTime) / 60
+            let s = Int(seg.startTime) % 60
+            return "[\(seg.speaker)] [\(String(format: "%02d:%02d", m, s))]\n\(seg.text)"
+        }.joined(separator: "\n\n")
     }
 
     // MARK: - Merge Whisper + Diarization

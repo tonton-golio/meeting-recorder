@@ -34,6 +34,14 @@ struct RecordingEntry: Identifiable, Codable {
     /// completes. Allows diarization to resume after a crash without re-running WhisperKit.
     /// Backward-compatible: old recordings without this field decode as nil.
     var rawSegmentsJSON: String?
+    /// JSON-serialized [PersistedSegment] saved after diarization completes.
+    /// Powers per-segment speaker reassignment in the detail view (the
+    /// transcript text alone is lossy — once you rename a speaker globally
+    /// you can't tell which segments came from which detected cluster).
+    /// Cleared when the user manually edits the transcript text, since the
+    /// segment timestamps and labels can no longer be trusted to match.
+    /// Backward-compatible: old recordings without this field decode as nil.
+    var mergedSegmentsJSON: String?
 
     var dateFormatted: String {
         let f = DateFormatter()
@@ -69,6 +77,29 @@ struct RecordingEntry: Identifiable, Codable {
         if size > 1_000 { return "\(size / 1_000) KB" }
         return "\(size) B"
     }
+}
+
+// MARK: - Persisted Segment (codable, stored on RecordingEntry.mergedSegmentsJSON)
+
+/// A single transcribed line with its speaker attribution and timing.
+/// Stored on RecordingEntry so the user can reassign individual segments
+/// to different speakers (or to known People) after the fact, including
+/// the case where diarization merged two real participants into one
+/// "Speaker N" cluster.
+///
+/// `speaker` is the displayed name in the transcript ("Speaker 0", "Bas", …).
+/// When it matches a Person's name, `personID` is set so the markdown
+/// wikilink resolves and so we know which Person to teach the matcher
+/// about when the segment is reassigned.
+struct PersistedSegment: Codable, Identifiable {
+    var id: Int { index }
+    /// Stable index used as identity in the segment list.
+    let index: Int
+    var startTime: Double
+    var endTime: Double
+    var text: String
+    var speaker: String
+    var personID: UUID?
 }
 
 // MARK: - Person (persisted to ~/.meeting-recorder/people/)

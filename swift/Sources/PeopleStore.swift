@@ -627,6 +627,115 @@ class PeopleStore: ObservableObject {
         }
     }
 
+    /// Extract a sub-clip of the recording, embed it via the diarizer, and
+    /// add the result as a new VoiceSample on `person`. Used when the user
+    /// manually reassigns transcript segments to a known Person — the
+    /// corrected sample teaches the matcher for future recordings.
+    /// Returns true on success.
+    @discardableResult
+    func learnSampleFromAudioRange(
+        person: Person,
+        audioURL: URL,
+        startTime: Double,
+        endTime: Double,
+        captureSource: AudioCaptureSource?,
+        using diarizer: OfflineDiarizerManager
+    ) async -> Bool {
+        guard FileManager.default.fileExists(atPath: audioURL.path),
+              endTime > startTime else { return false }
+
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("learn-\(UUID().uuidString).caf")
+        await extractAudioClip(from: audioURL, start: startTime, end: endTime, to: tempURL)
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        guard FileManager.default.fileExists(atPath: tempURL.path) else { return false }
+
+        let embedding: [Float]
+        let quality: Float?
+        do {
+            let result = try await diarizer.process(tempURL)
+            let best = result.segments
+                .filter { !$0.embedding.isEmpty }
+                .max(by: { $0.qualityScore < $1.qualityScore })
+            if let best {
+                embedding = best.embedding
+                quality = best.qualityScore
+            } else if let db = result.speakerDatabase?.values.first(where: { !$0.isEmpty }) {
+                embedding = db
+                quality = nil
+            } else {
+                return false
+            }
+        } catch {
+            NSLog("[PeopleStore] learnSampleFromAudioRange: diarize failed: \(error)")
+            return false
+        }
+
+        await addSample(
+            to: person,
+            audioURL: audioURL,
+            startTime: startTime,
+            endTime: endTime,
+            embedding: embedding,
+            qualityScore: quality,
+            captureSource: captureSource
+        )
+        return true
+    }
+
+    /// Same as `learnSampleFromAudioRange` but creates the Person first.
+    /// Returns the new Person on success.
+    func learnNewPersonFromAudioRange(
+        name: String,
+        audioURL: URL,
+        startTime: Double,
+        endTime: Double,
+        captureSource: AudioCaptureSource?,
+        using diarizer: OfflineDiarizerManager
+    ) async -> Person? {
+        guard FileManager.default.fileExists(atPath: audioURL.path),
+              endTime > startTime else { return nil }
+
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("learn-\(UUID().uuidString).caf")
+        await extractAudioClip(from: audioURL, start: startTime, end: endTime, to: tempURL)
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        guard FileManager.default.fileExists(atPath: tempURL.path) else { return nil }
+
+        let embedding: [Float]
+        let quality: Float?
+        do {
+            let result = try await diarizer.process(tempURL)
+            let best = result.segments
+                .filter { !$0.embedding.isEmpty }
+                .max(by: { $0.qualityScore < $1.qualityScore })
+            if let best {
+                embedding = best.embedding
+                quality = best.qualityScore
+            } else if let db = result.speakerDatabase?.values.first(where: { !$0.isEmpty }) {
+                embedding = db
+                quality = nil
+            } else {
+                return nil
+            }
+        } catch {
+            NSLog("[PeopleStore] learnNewPersonFromAudioRange: diarize failed: \(error)")
+            return nil
+        }
+
+        return await createPerson(
+            name: name,
+            audioURL: audioURL,
+            startTime: startTime,
+            endTime: endTime,
+            embedding: embedding,
+            qualityScore: quality,
+            captureSource: captureSource
+        )
+    }
+
     /// Re-embed every sample in the library using `diarizer`. Saves once at
     /// the end. Returns number of samples successfully re-embedded.
     @discardableResult

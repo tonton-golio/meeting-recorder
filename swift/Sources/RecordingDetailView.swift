@@ -13,6 +13,9 @@ struct RecordingDetailView: View {
     @State private var editedNotes = ""
     @State private var isEditingTranscript = false
     @State private var editedTranscriptText = ""
+    @State private var selectedSegmentIndices: Set<Int> = []
+    @State private var showNewPersonSheet = false
+    @State private var newPersonName = ""
 
     private static var pendingNotesSave: DispatchWorkItem?
     /// Captures the most recent unsaved notes payload so `flushPendingNotesSave`
@@ -91,7 +94,11 @@ struct RecordingDetailView: View {
             Self.flushPendingNotesSave()
             editingTitle = false
             isEditingTranscript = false
+            selectedSegmentIndices = []
             editedNotes = entry.notes ?? ""
+        }
+        .sheet(isPresented: $showNewPersonSheet) {
+            newPersonSheet
         }
         .onAppear {
             editedNotes = entry.notes ?? ""
@@ -335,6 +342,20 @@ struct RecordingDetailView: View {
                     .scrollContentBackground(.hidden)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)
+            } else if let segments = state.loadPersistedSegments(for: entry), !segments.isEmpty {
+                if !selectedSegmentIndices.isEmpty {
+                    reassignToolbar(selected: selectedSegmentIndices.count)
+                    Divider()
+                }
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        ForEach(segments) { seg in
+                            reassignableRow(seg)
+                        }
+                    }
+                    .padding(.vertical, 12)
+                    .padding(.bottom, 8)
+                }
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 2) {
@@ -361,7 +382,11 @@ struct RecordingDetailView: View {
         state.transcript = editedTranscriptText
         if let id = state.selectedRecordingID {
             state.recordingStore.update(id: id, transcript: editedTranscriptText)
+            // Free-text edits invalidate per-segment timing/labels — drop the
+            // snapshot so the reassignment UI doesn't operate on stale data.
+            state.invalidateSegmentSnapshot(for: id)
         }
+        selectedSegmentIndices = []
         state.markDirty()
     }
 
@@ -460,6 +485,200 @@ struct RecordingDetailView: View {
     private func colorFor(speaker: String) -> Color {
         let hash = abs(speaker.hashValue)
         return speakerColors[hash % speakerColors.count]
+    }
+
+    // MARK: - Reassignable Transcript Rows
+
+    private func reassignableRow(_ seg: PersistedSegment) -> some View {
+        let selected = selectedSegmentIndices.contains(seg.index)
+        let timestamp = formatTimestamp(seg.startTime)
+
+        return HStack(alignment: .top, spacing: 10) {
+            Text(seg.speaker.prefix(1).uppercased())
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.white)
+                .frame(width: 24, height: 24)
+                .background(Circle().fill(colorFor(speaker: seg.speaker)))
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(seg.speaker)
+                        .font(.subheadline.weight(.medium))
+                    Button {
+                        seekToSeconds(seg.startTime)
+                    } label: {
+                        Text(timestamp)
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.tertiary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Play from \(timestamp)")
+
+                    Spacer()
+
+                    reassignMenu(for: seg)
+                        .opacity(selected ? 1 : 0.0001)
+                }
+                Text(seg.text)
+                    .font(.body)
+                    .textSelection(.enabled)
+                    .lineSpacing(3)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 6)
+        .background(selected ? Color.accentColor.opacity(0.12) : Color.clear)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if selectedSegmentIndices.contains(seg.index) {
+                selectedSegmentIndices.remove(seg.index)
+            } else {
+                selectedSegmentIndices.insert(seg.index)
+            }
+        }
+        .contextMenu {
+            reassignMenuContent(for: [seg.index])
+        }
+    }
+
+    private func reassignToolbar(selected: Int) -> some View {
+        HStack(spacing: 12) {
+            Text("\(selected) segment\(selected == 1 ? "" : "s") selected")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+
+            Button("Clear") {
+                selectedSegmentIndices = []
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+
+            Spacer()
+
+            Menu {
+                reassignMenuContent(for: selectedSegmentIndices)
+            } label: {
+                Label("Reassign to…", systemImage: "person.crop.circle.badge.plus")
+            }
+            .menuStyle(.borderedButton)
+            .controlSize(.small)
+            .fixedSize()
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 8)
+        .background(Color.accentColor.opacity(0.06))
+    }
+
+    private func reassignMenu(for seg: PersistedSegment) -> some View {
+        Menu {
+            reassignMenuContent(for: [seg.index])
+        } label: {
+            Image(systemName: "person.crop.circle.badge.plus")
+                .foregroundStyle(.secondary)
+        }
+        .menuStyle(.borderlessButton)
+        .frame(width: 22)
+    }
+
+    @ViewBuilder
+    private func reassignMenuContent(for indices: Set<Int>) -> some View {
+        let people = state.peopleStore.people
+        let speakers = state.distinctSpeakerNames(for: entry)
+
+        if !people.isEmpty {
+            Section("Existing person") {
+                ForEach(people) { person in
+                    Button(person.name) {
+                        applyReassignment(.existingPerson(person), indices: indices)
+                    }
+                }
+            }
+        }
+
+        if !speakers.isEmpty {
+            Section("Existing speaker label") {
+                ForEach(speakers, id: \.self) { name in
+                    Button(name) {
+                        applyReassignment(.existingSpeakerName(name), indices: indices)
+                    }
+                }
+            }
+        }
+
+        Divider()
+
+        Button {
+            newPersonName = ""
+            // Stash the selection so the sheet's Save commits to the right
+            // segments even after the user clicks elsewhere.
+            selectedSegmentIndices = indices
+            showNewPersonSheet = true
+        } label: {
+            Label("New person…", systemImage: "person.badge.plus")
+        }
+    }
+
+    private func applyReassignment(_ target: AppState.SegmentReassignTarget, indices: Set<Int>) {
+        Task {
+            await state.reassignSegments(indices, to: target)
+            selectedSegmentIndices = []
+        }
+    }
+
+    private var newPersonSheet: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Create new person")
+                .font(.headline)
+            Text("A voice sample from the selected segment\(selectedSegmentIndices.count == 1 ? "" : "s") will be added to their profile.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            TextField("Name", text: $newPersonName)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { submitNewPerson() }
+
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) {
+                    showNewPersonSheet = false
+                    newPersonName = ""
+                }
+                Button("Create") { submitNewPerson() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(newPersonName.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 360)
+    }
+
+    private func submitNewPerson() {
+        let name = newPersonName.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return }
+        let indices = selectedSegmentIndices
+        showNewPersonSheet = false
+        newPersonName = ""
+        Task {
+            await state.reassignSegments(indices, to: .newPerson(name: name))
+            selectedSegmentIndices = []
+        }
+    }
+
+    private func formatTimestamp(_ seconds: Double) -> String {
+        let m = Int(seconds) / 60
+        let s = Int(seconds) % 60
+        return String(format: "%02d:%02d", m, s)
+    }
+
+    private func seekToSeconds(_ seconds: Double) {
+        guard let url = state.recordingStore.audioURL(for: entry) else { return }
+        if state.player.totalDuration <= 0 {
+            state.player.load(url: url)
+        }
+        guard state.player.totalDuration > 0 else { return }
+        let fraction = max(0, min(1, seconds / state.player.totalDuration))
+        state.player.seek(to: fraction)
+        state.player.resume()
     }
 
     /// Seek the audio player to the given MM:SS (or H:MM:SS) timestamp and start playing.
