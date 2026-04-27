@@ -338,9 +338,11 @@ class TranscriptionService {
             ))
         }
 
-        let displayReady = mergeConsecutiveSameSpeaker(mergedSegments)
-            .filter { !$0.text.isEmpty }
-        let mergedDisplay: [PersistedSegment] = displayReady.enumerated().map { idx, seg in
+        // Persist UN-merged segments — one PersistedSegment per Whisper
+        // utterance. Lets the user split a misclassified merged cluster
+        // back into its underlying utterances and reassign each one.
+        let unmerged = mergedSegments.filter { !$0.text.isEmpty }
+        let persisted: [PersistedSegment] = unmerged.enumerated().map { idx, seg in
             PersistedSegment(
                 index: idx,
                 startTime: Double(seg.startTime),
@@ -351,24 +353,65 @@ class TranscriptionService {
             )
         }
 
-        let transcript = TranscriptionService.formatTranscriptText(from: mergedDisplay)
+        let transcript = TranscriptionService.formatTranscriptText(from: persisted)
 
         return MeetingTranscriptionResult(
             transcript: transcript,
             detectedSpeakers: detectedSpeakers,
-            mergedSegments: mergedDisplay
+            mergedSegments: persisted
         )
     }
 
     /// Re-render the transcript text from a `[PersistedSegment]` snapshot.
+    /// Consecutive same-speaker utterances within ~5s are merged so the
+    /// human-readable transcript and markdown stay clean even though the
+    /// underlying snapshot is stored at Whisper-segment granularity.
     /// Public so AppState can call it after the user reassigns segments.
     static func formatTranscriptText(from segments: [PersistedSegment]) -> String {
-        return segments.compactMap { seg in
+        let merged = collapseConsecutiveSameSpeaker(segments)
+        return merged.compactMap { seg in
             guard !seg.text.isEmpty else { return nil }
             let m = Int(seg.startTime) / 60
             let s = Int(seg.startTime) % 60
             return "[\(seg.speaker)] [\(String(format: "%02d:%02d", m, s))]\n\(seg.text)"
         }.joined(separator: "\n\n")
+    }
+
+    /// Merge consecutive same-speaker segments whose gap is small enough to
+    /// read as one utterance. The persisted snapshot stays un-merged; this
+    /// is purely cosmetic for the rendered transcript.
+    private static func collapseConsecutiveSameSpeaker(
+        _ segments: [PersistedSegment],
+        maxGap: Double = 5.0
+    ) -> [PersistedSegment] {
+        var out: [PersistedSegment] = []
+        for seg in segments {
+            let trimmed = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            if let last = out.last,
+               last.speaker == seg.speaker,
+               (seg.startTime - last.endTime) <= maxGap {
+                out.removeLast()
+                out.append(PersistedSegment(
+                    index: last.index,
+                    startTime: last.startTime,
+                    endTime: seg.endTime,
+                    text: last.text + " " + trimmed,
+                    speaker: last.speaker,
+                    personID: last.personID
+                ))
+            } else {
+                out.append(PersistedSegment(
+                    index: seg.index,
+                    startTime: seg.startTime,
+                    endTime: seg.endTime,
+                    text: trimmed,
+                    speaker: seg.speaker,
+                    personID: seg.personID
+                ))
+            }
+        }
+        return out
     }
 
     // MARK: - Merge Whisper + Diarization
