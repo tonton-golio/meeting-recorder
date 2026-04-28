@@ -462,6 +462,19 @@ final class VoiceProcessedMicCapture: @unchecked Sendable {
         let input = engine.inputNode
         try input.setVoiceProcessingEnabled(true)
 
+        // Disable voice-processing AGC and aggressive output ducking. By default
+        // VPIO drops the system output level so AEC has an easier time —
+        // unusable when the user needs to actually hear the meeting they're
+        // in. Echo cancellation still works without these.
+        input.isVoiceProcessingAGCEnabled = false
+        if #available(macOS 14.0, *) {
+            input.voiceProcessingOtherAudioDuckingConfiguration =
+                AVAudioVoiceProcessingOtherAudioDuckingConfiguration(
+                    enableAdvancedDucking: false,
+                    duckingLevel: .min
+                )
+        }
+
         let inputFormat = input.outputFormat(forBus: 0)
         debugLog("[VoiceProcessedMic] input format: sr=\(inputFormat.sampleRate) ch=\(inputFormat.channelCount)")
 
