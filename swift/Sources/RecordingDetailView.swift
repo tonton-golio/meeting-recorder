@@ -494,28 +494,43 @@ struct RecordingDetailView: View {
     private var playerBar: some View {
         VStack(spacing: 6) {
             GeometryReader { geo in
+                let trackHeight: CGFloat = 6
+                let thumbSize: CGFloat = 14
+                let progress = max(0, min(1, state.player.progress))
+                let thumbX = geo.size.width * progress
+
                 ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 2)
+                    Capsule()
                         .fill(.quaternary)
-                        .frame(height: 4)
-                    RoundedRectangle(cornerRadius: 2)
+                        .frame(height: trackHeight)
+                    Capsule()
                         .fill(Color.accentColor)
-                        .frame(width: max(0, geo.size.width * state.player.progress), height: 4)
+                        .frame(width: thumbX, height: trackHeight)
+                    Circle()
+                        .fill(Color.accentColor)
+                        .frame(width: thumbSize, height: thumbSize)
+                        .shadow(radius: 1, y: 1)
+                        .offset(x: thumbX - thumbSize / 2)
                 }
-                .frame(height: 8)
+                .frame(height: max(trackHeight, thumbSize))
                 .contentShape(Rectangle())
                 .gesture(DragGesture(minimumDistance: 0).onChanged { value in
-                    let fraction = value.location.x / geo.size.width
                     if state.player.totalDuration <= 0 {
                         if let url = state.recordingStore.audioURL(for: entry) {
                             state.player.load(url: url)
                         }
                         guard state.player.totalDuration > 0 else { return }
                     }
+                    let fraction = value.location.x / geo.size.width
                     state.player.seek(to: max(0, min(1, fraction)))
                 })
+                .onHover { inside in
+                    if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                }
             }
-            .frame(height: 8)
+            .frame(height: 16)
+            .onAppear { autoLoadAudioForPlayer() }
+            .onChange(of: entry.id) { _, _ in autoLoadAudioForPlayer() }
 
             HStack {
                 Text(state.player.currentTimeFormatted)
@@ -548,6 +563,18 @@ struct RecordingDetailView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
+    }
+
+    /// Pre-load the audio file when the detail view appears or the selected
+    /// recording changes, so `totalDuration` is known and the user can scrub
+    /// before pressing Play. Skipped if the player is currently playing
+    /// (would cancel that session).
+    private func autoLoadAudioForPlayer() {
+        guard !state.player.isPlaying else { return }
+        guard state.player.totalDuration <= 0 else { return }
+        if let url = state.recordingStore.audioURL(for: entry) {
+            state.player.load(url: url)
+        }
     }
 
     // MARK: - Action Bar
