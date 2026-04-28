@@ -3,6 +3,11 @@ import SwiftUI
 struct RecordingInProgressView: View {
     @ObservedObject var state: AppState
 
+    /// Live-bound to the in-progress recording's title. Edits are written
+    /// straight back through `state.renameRecording` so the title sticks
+    /// after stop without a separate "save" step.
+    @State private var liveTitle: String = ""
+
     var body: some View {
         VStack(spacing: 20) {
             Spacer()
@@ -18,6 +23,20 @@ struct RecordingInProgressView: View {
                 .monospacedDigit()
                 .contentTransition(.numericText())
                 .foregroundStyle(.primary)
+
+            // Live title — fill in while the recording is running so the
+            // file is named correctly the moment you hit Stop.
+            TextField("Meeting title (optional)", text: $liveTitle)
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: 360)
+                .onChange(of: liveTitle) { _, val in
+                    if let entry = state.selectedRecording {
+                        state.renameRecording(entry, to: val)
+                    }
+                }
+                .onAppear {
+                    liveTitle = state.selectedRecording?.title ?? ""
+                }
 
             // Live waveforms
             VStack(spacing: 12) {
