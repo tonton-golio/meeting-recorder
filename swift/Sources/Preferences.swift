@@ -42,6 +42,17 @@ class Preferences {
         set { defaults.set(newValue, forKey: "captureSystemAudio") }
     }
 
+    /// Run the microphone input through Apple's Voice Processing AU
+    /// (acoustic echo cancellation + noise suppression). Recommended when
+    /// the user is on speaker — the remote participants' voices coming back
+    /// through the mic are subtracted, so the mic stem contains only the
+    /// in-room speaker(s). Diarization then sees a clean source-aware split
+    /// between mic (you) and the system stem (everyone else).
+    var voiceProcessingEnabled: Bool {
+        get { defaults.object(forKey: "voiceProcessingEnabled") as? Bool ?? false }
+        set { defaults.set(newValue, forKey: "voiceProcessingEnabled") }
+    }
+
     // MARK: - Speaker matching thresholds
 
     /// Cosine similarity required to auto-match a diarized speaker to a known
