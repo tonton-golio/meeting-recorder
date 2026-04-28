@@ -34,6 +34,11 @@ struct RecordingEntry: Identifiable, Codable {
     /// completes. Allows diarization to resume after a crash without re-running WhisperKit.
     /// Backward-compatible: old recordings without this field decode as nil.
     var rawSegmentsJSON: String?
+    /// JSON-serialized [PersistedSpeaker] for any detected speakers the user has not
+    /// yet confirmed (still pending or skipped). Lets the user re-open the speaker
+    /// confirmation UI from the detail view after navigating away.
+    /// Backward-compatible: old recordings without this field decode as nil.
+    var unresolvedSpeakersJSON: String?
 
     var dateFormatted: String {
         let f = DateFormatter()
@@ -134,6 +139,34 @@ struct DetectedSpeaker: Identifiable {
     var matchPercentage: String? {
         guard let score = matchScore else { return nil }
         return "\(Int(score * 100))%"
+    }
+}
+
+// MARK: - Persisted Speaker (codable snapshot stored on RecordingEntry)
+
+/// Minimal codable snapshot of a detected speaker, used to repopulate the
+/// confirmation UI after the user has navigated away. Recommendations and
+/// auto-matches are intentionally not persisted — they are recomputed against
+/// the current PeopleStore when the speakers are re-opened.
+struct PersistedSpeaker: Codable {
+    let label: String
+    let embedding: [Float]
+    let sampleStartTime: Double
+    let sampleEndTime: Double
+    let sampleQuality: Float?
+    let captureSource: AudioCaptureSource
+    /// The name shown in the transcript at the time this snapshot was taken.
+    /// May be the original "Speaker N" label or an auto-matched name.
+    let assignedName: String
+
+    init(from speaker: DetectedSpeaker) {
+        self.label = speaker.label
+        self.embedding = speaker.embedding
+        self.sampleStartTime = speaker.sampleStartTime
+        self.sampleEndTime = speaker.sampleEndTime
+        self.sampleQuality = speaker.sampleQuality
+        self.captureSource = speaker.captureSource
+        self.assignedName = speaker.assignedName
     }
 }
 
