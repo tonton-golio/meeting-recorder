@@ -604,7 +604,7 @@ class TranscriptionService {
         ("openai_whisper-base", "Base", "142 MB"),
         ("openai_whisper-small", "Small", "466 MB"),
         ("openai_whisper-medium", "Medium", "1.5 GB"),
-        ("openai_whisper-large-v3-turbo", "Large v3 Turbo", "1.5 GB"),
+        ("openai_whisper-large-v3_turbo", "Large v3 Turbo", "1.5 GB"),
         ("openai_whisper-large-v3", "Large v3", "2.9 GB"),
     ]
 
